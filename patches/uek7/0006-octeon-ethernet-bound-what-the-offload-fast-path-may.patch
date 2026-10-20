@@ -1,0 +1,145 @@
+From b0cf49232505a3a62cb668b82d394792ef0175f7 Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 07:03:45 +0000
+Subject: [PATCH 06/10] octeon-ethernet: bound what the offload fast path may queue for transmit
+
+Packets forwarded by the ipfwd fast path go to PKO in their receive
+buffers via cvm_oct_transmit_qos(), which had no queue-depth limit (the
+slow path stops at MAX_OUT_QUEUE_DEPTH). A flow forwarded into a slower
+port therefore queued until the FPA packet pool (1024 buffers) ran low,
+and RED then dropped input on every port. On an ER-4 with eth3 linked
+at 100 Mbit/s, an offloaded 900 Mbit/s UDP flow eth2 -> eth3 made pings
+to the router on eth2 lose ~90% and an unrelated eth3 -> eth2 stream
+lose 79%; with the fast path off both were clean.
+
+Count fast-path packets in the per-queue FAU the slow path already uses
+(PKO decrements it on completion) and drop above fwd_queue_depth (128,
+runtime-tunable). cvm_oct_transmit_qos_not_free() decremented that FAU
+via the response WQE without ever incrementing it; it now takes a slot
+too. Raise num_packet_buffers to 4096 so that every port's lockless
+queues full (4 x 4 x 128) still leave the pool above the RED thresholds.
+
+After: the same flood loses nothing on other paths, the excess shows up
+as eth3 tx_dropped, bulk TCP into the 100 Mbit/s port keeps 94 Mbit/s
+with 15 ms instead of 76 ms of queueing, 64-byte forwarding unchanged
+(813 kpps, 0 rx drops).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../net/ethernet/cavium/octeon/ethernet-tx.c  | 46 +++++++++++++++++++
+ drivers/net/ethernet/cavium/octeon/ethernet.c | 11 ++++-
+ 2 files changed, 55 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/ethernet/cavium/octeon/ethernet-tx.c b/drivers/net/ethernet/cavium/octeon/ethernet-tx.c
+index 5e18f524d..1b2fbc0c3 100644
+--- a/drivers/net/ethernet/cavium/octeon/ethernet-tx.c
++++ b/drivers/net/ethernet/cavium/octeon/ethernet-tx.c
+@@ -130,6 +130,28 @@ static inline void cvm_oct_set_back(struct sk_buff *skb,
+ 	hw_buffer->s.back = ((unsigned long)skb->data >> 7) - ((unsigned long)fpa_head >> 7);
+ }
+ 
++/*
++ * Packets forwarded by the offload fast path (cvm_oct_transmit_qos*) are sent
++ * from their receive buffers. Those come from the FPA packet pool
++ * (num_packet_buffers, 1024 by default), and once the pool runs low, RED drops
++ * input on every port. So a flow forwarded into a slower port must not be able
++ * to queue without limit, or it starves the receive side of the whole router.
++ * Cap per transmit queue, counted in the same FAU register as the slow path's
++ * MAX_OUT_QUEUE_DEPTH.
++ */
++static int fwd_queue_depth = 128;
++module_param(fwd_queue_depth, int, 0644);
++MODULE_PARM_DESC(fwd_queue_depth, "Most packets the offload fast path may have queued per transmit queue");
++
++/* Account one more queued packet; false (and nothing accounted) if the queue is full */
++static inline bool cvm_oct_fwd_queue_get(struct octeon_ethernet *priv, int qos)
++{
++	if (likely(cvmx_hwfau_fetch_and_add32(priv->tx_queue[qos].fau, 1) < READ_ONCE(fwd_queue_depth)))
++		return true;
++	cvmx_hwfau_atomic_add32(priv->tx_queue[qos].fau, -1);
++	return false;
++}
++
+ #define CVM_OCT_LOCKLESS 1
+ #include "ethernet-xmit.c"
+ 
+@@ -193,6 +215,13 @@ int cvm_oct_transmit_qos(struct net_device *dev,
+ 		lock_type = CVMX_PKO_LOCK_CMD_QUEUE;
+ 	}
+ 
++	if (unlikely(!cvm_oct_fwd_queue_get(priv, qos))) {
++		if (do_free)
++			cvm_oct_free_work(work);
++		dev->stats.tx_dropped++;
++		return -1;
++	}
++
+ 	/* Start off assuming no drop */
+ 	dropped = 0;
+ 
+@@ -218,6 +247,11 @@ int cvm_oct_transmit_qos(struct net_device *dev,
+ 	pko_command.s.segs = work->word2.s.bufs;
+ 	pko_command.s.total_bytes = work->word1.len;
+ 
++	/* PKO decrements the queue's FAU once the packet is out */
++	pko_command.s.size0 = CVMX_FAU_OP_SIZE_32;
++	pko_command.s.subone0 = 1;
++	pko_command.s.reg0 = priv->tx_queue[qos].fau;
++
+ 	/* Check if we can use the hardware checksumming */
+ 	if (unlikely(work->word2.s.not_IP || work->word2.s.IP_exc))
+ 		pko_command.s.ipoffp1 = 0;
+@@ -237,6 +271,7 @@ int cvm_oct_transmit_qos(struct net_device *dev,
+ 	local_irq_restore(flags);
+ 
+ 	if (unlikely(dropped)) {
++		cvmx_hwfau_atomic_add32(priv->tx_queue[qos].fau, -1);
+ 		if (do_free)
+ 			cvm_oct_free_work(work);
+ 		dev->stats.tx_dropped++;
+@@ -308,6 +343,17 @@ int cvm_oct_transmit_qos_not_free(struct net_device *dev,
+ 		lock_type = CVMX_PKO_LOCK_CMD_QUEUE;
+ 	}
+ 
++	/* The FAU is decremented when the response WQE comes back (ethernet-napi.c)
++	 * or below on a drop, so it must be incremented here too
++	 */
++	if (unlikely(!cvm_oct_fwd_queue_get(priv, qos))) {
++		dev_kfree_skb_any(skb);
++		dev->stats.tx_dropped++;
++		if (work)
++			cvmx_fpa_free(work, packet_pool, DONT_WRITEBACK(1));
++		return -1;
++	}
++
+ 	/* Start off assuming no drop */
+ 	dropped = 0;
+ 
+diff --git a/drivers/net/ethernet/cavium/octeon/ethernet.c b/drivers/net/ethernet/cavium/octeon/ethernet.c
+index 9048da6ed..329d6f183 100644
+--- a/drivers/net/ethernet/cavium/octeon/ethernet.c
++++ b/drivers/net/ethernet/cavium/octeon/ethernet.c
+@@ -67,11 +67,18 @@ int octeon_recycle_tx = REUSE_SKBUFFS_WITHOUT_FREE;
+ module_param_named(recycle_tx, octeon_recycle_tx, int, S_IRUGO | S_IWUSR | S_IWGRP);
+ MODULE_PARM_DESC(recycle_tx, "Allow hardware SKB recycling.");
+ 
+-int num_packet_buffers = 1024;
++/*
++ * 4096 (SDK default 1024): the offload fast path keeps forwarded packets in these
++ * buffers while they wait in a transmit queue, up to fwd_queue_depth per queue
++ * (ethernet-tx.c). With 4 ports x 4 lockless (per-core) queues x 128 that is 2048,
++ * which leaves the pool above the RED thresholds below (1/4 and 1/8 of the pool)
++ * even with every port congested. 8 MB of buffers.
++ */
++int num_packet_buffers = 4096;
+ module_param(num_packet_buffers, int, 0444);
+ MODULE_PARM_DESC(num_packet_buffers, "\n"
+ 	"\tNumber of packet buffers to allocate and store in the\n"
+-	"\tFPA. By default, 1024 packet buffers are used.");
++	"\tFPA. By default, 4096 packet buffers are used.");
+ 
+ int pow_receive_group = 15;
+ module_param(pow_receive_group, int, 0444);
+-- 
+2.47.3
+

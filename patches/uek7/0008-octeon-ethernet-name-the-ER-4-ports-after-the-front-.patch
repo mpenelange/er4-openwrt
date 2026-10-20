@@ -1,0 +1,79 @@
+From 4bf512ca131b45d1d24c10864ccb5fe13249b52b Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 22:48:15 +0000
+Subject: [PATCH 08/10] octeon-ethernet: name the ER-4 ports after the front panel
+
+The ER-4's QSGMII ports come up in hardware order SFP, eth0, eth1, eth2,
+so the kernel named the SFP cage eth0 and panel eth0..eth2 eth1..eth3.
+Ubiquiti's kernel renames them (intf_remap_300 in the EdgeOS GPL
+ethernet.c); do the same for UBNT E300 major rev 0, so eth0..eth2 are
+the RJ45 ports as labelled and eth3 is the SFP cage. The SDK's copy of
+the board type list (cvmx-app-init.h, which the driver sees) gains
+UBNT_E300, as cvmx-bootinfo.h already has it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/mips/include/asm/octeon/cvmx-app-init.h  |  2 ++
+ drivers/net/ethernet/cavium/octeon/ethernet.c | 19 ++++++++++++++++++-
+ 2 files changed, 20 insertions(+), 1 deletion(-)
+
+diff --git a/arch/mips/include/asm/octeon/cvmx-app-init.h b/arch/mips/include/asm/octeon/cvmx-app-init.h
+index 001e7c075..82d62b794 100644
+--- a/arch/mips/include/asm/octeon/cvmx-app-init.h
++++ b/arch/mips/include/asm/octeon/cvmx-app-init.h
+@@ -366,6 +366,7 @@ enum cvmx_board_types_enum {
+ 	 ** use any numbers in this range. */
+ 	CVMX_BOARD_TYPE_CUST_PRIVATE_MIN = 20001,
+ 	CVMX_BOARD_TYPE_UBNT_E100 = 20002,
++	CVMX_BOARD_TYPE_UBNT_E300 = 20300,
+ 	CVMX_BOARD_TYPE_CUST_DSR1000N = 20006,
+ 	CVMX_BOARD_TYPE_KONTRON_S1901 = 21901,
+ 	CVMX_BOARD_TYPE_CUST_PRIVATE_MAX = 30000,
+@@ -513,6 +514,7 @@ static inline const char *cvmx_board_type_to_string(enum cvmx_board_types_enum t
+ 		/* Customer private range */
+ 		ENUM_BRD_TYPE_CASE(CVMX_BOARD_TYPE_CUST_PRIVATE_MIN)
+ 		ENUM_BRD_TYPE_CASE(CVMX_BOARD_TYPE_UBNT_E100)
++		ENUM_BRD_TYPE_CASE(CVMX_BOARD_TYPE_UBNT_E300)
+ 		ENUM_BRD_TYPE_CASE(CVMX_BOARD_TYPE_CUST_DSR1000N)
+ 		ENUM_BRD_TYPE_CASE(CVMX_BOARD_TYPE_KONTRON_S1901)
+ 		ENUM_BRD_TYPE_CASE(CVMX_BOARD_TYPE_CUST_CLARK)
+diff --git a/drivers/net/ethernet/cavium/octeon/ethernet.c b/drivers/net/ethernet/cavium/octeon/ethernet.c
+index 329d6f183..100ac1e8b 100644
+--- a/drivers/net/ethernet/cavium/octeon/ethernet.c
++++ b/drivers/net/ethernet/cavium/octeon/ethernet.c
+@@ -163,6 +163,23 @@ struct octeon_ethernet *cvm_oct_by_srio_mbox[4][4];
+ LIST_HEAD(cvm_oct_list);
+ 
+ static void cvm_oct_rx_refill_worker(struct work_struct *work);
++
++/*
++ * EdgeRouter 4 (UBNT E300, board major rev 0): the four QSGMII ports come up in
++ * hardware order SFP, eth0, eth1, eth2. Name them after the front panel, as
++ * Ubiquiti's kernel does (intf_remap_300 in the EdgeOS GPL ethernet.c).
++ */
++static const char * const cvm_oct_er4_names[] = { "eth3", "eth0", "eth1", "eth2" };
++static int cvm_oct_er4_index;
++
++static const char *cvm_oct_board_port_name(void)
++{
++	if (cvmx_sysinfo_get()->board_type != CVMX_BOARD_TYPE_UBNT_E300 ||
++	    cvmx_sysinfo_get()->board_rev_major != 0 ||
++	    cvm_oct_er4_index >= ARRAY_SIZE(cvm_oct_er4_names))
++		return "eth%d";
++	return cvm_oct_er4_names[cvm_oct_er4_index++];
++}
+ static DECLARE_DELAYED_WORK(cvm_oct_rx_refill_work, cvm_oct_rx_refill_worker);
+ 
+ static void cvm_oct_rx_refill_worker(struct work_struct *work)
+@@ -1163,7 +1180,7 @@ static int cvm_oct_probe(struct platform_device *pdev)
+ 					&cvm_oct_sgmii_lockless_netdev_ops : &cvm_oct_sgmii_netdev_ops;
+ 				dev->priv_flags |= IFF_UNICAST_FLT;
+ 				priv->gmx_base = CVMX_GMXX_RXX_INT_REG(interface_port, interface);
+-				strcpy(dev->name, "eth%d");
++				strcpy(dev->name, cvm_oct_board_port_name());
+ 				break;
+ 
+ 			case CVMX_HELPER_INTERFACE_MODE_AGL:
+-- 
+2.47.3
+

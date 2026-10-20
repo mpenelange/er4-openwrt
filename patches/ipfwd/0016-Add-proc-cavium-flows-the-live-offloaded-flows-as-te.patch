@@ -1,0 +1,159 @@
+From c2b1971f0214f1cad1eb1e81b16111e970a94469 Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 21:58:36 -0500
+Subject: [PATCH 16/18] Add /proc/cavium/flows: the live offloaded flows as text
+
+List the live (unexpired) IPv4 and IPv6 flows in /proc/cavium/flows, as
+text, read-only. Unlike cavium/ipv4/flows (the EdgeOS Traffic Analysis
+feed), reading it doesn't zero any counters, and it needs no export switch.
+
+The web UI's connection list uses it: er4.conntrack matches each conntrack
+entry's original and reply tuples against these flows to show which
+connections the fast path carries, and why the others stay on the CPU.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ipfwd.c | 113 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 113 insertions(+)
+
+diff --git a/ipfwd.c b/ipfwd.c
+index 6714a0d..93dcff4 100644
+--- a/ipfwd.c
++++ b/ipfwd.c
+@@ -4768,6 +4768,116 @@ static void cvm_ipfwd_invalidate_exit(void)
+ 	flush_work(&cvm_ipfwd_inval_work);
+ }
+ 
++/*
++ * /proc/cavium/flows: the live (unexpired) offloaded flows, IPv4 then IPv6, one
++ * text line each, for the web UI's "is this flow offloaded?" view. Read-only and
++ * side-effect free (unlike cavium/ipv4/flows, whose reads zero the counters):
++ *   family proto in_dev out_dev src sport dst dport tx_src tx_sport tx_dst tx_dport vlan age_ms
++ * The tx_* tuple is the packet as sent (after NAT). The table mutex is held from
++ * start to stop, as in export.c.
++ */
++static void *flows_seq_start(struct seq_file *s, loff_t *pos)
++{
++	mutex_lock(&cvm_ipfwd_table_mutex);
++	if (*pos >= (loff_t)ipv4_cache_size + ipv6_cache_size)
++		return NULL;
++	return pos;
++}
++
++static void *flows_seq_next(struct seq_file *s, void *v, loff_t *pos)
++{
++	if (++*pos >= (loff_t)ipv4_cache_size + ipv6_cache_size)
++		return NULL;
++	return pos;
++}
++
++static void flows_seq_stop(struct seq_file *s, void *v)
++{
++	mutex_unlock(&cvm_ipfwd_table_mutex);
++}
++
++static int flows_seq_show(struct seq_file *s, void *v)
++{
++	loff_t n = *(loff_t *)v;
++	bool ip6 = n >= ipv4_cache_size;
++	cvm_ipfwd_flow_bucket_t *cache = ip6 ? cvm_gbl_ipv6_fwd_cache : cvm_gbl_ipv4_fwd_cache;
++	cvm_ipfwd_flow_bucket_t *bucket;
++	cvm_ipfwd_flow_entry_t e[CVM_IPFWD_ENTRIES_PER_BUCKET];
++	unsigned long flags;
++	u32 now = CVM_IPFWD_TIMER_GET_TIME;
++	int i;
++
++	if (ip6) {
++		n -= ipv4_cache_size;
++		if (!cvm_ipv6_fwd)
++			return 0;
++	} else if (!cvm_ipv4_fwd)
++		return 0;
++	if (!cache)
++		return 0;
++
++	bucket = &cache[n];
++	spin_lock_irqsave(&bucket->hdr.wr_lock, flags);	/* writers hold it: the entries are stable */
++	memcpy(e, bucket->entry, sizeof(e));
++	spin_unlock_irqrestore(&bucket->hdr.wr_lock, flags);
++
++	rcu_read_lock();	/* flow_info is freed after a grace period */
++	for (i = 0; i < CVM_IPFWD_ENTRIES_PER_BUCKET; i++) {
++		cvm_ipfwd_flow_info_t *fi;
++		struct net_device *in;
++		u32 ports;
++
++		if (!e[i].s.flow_info || !e[i].s.id0 || e[i].s.id0 != e[i].s.id1)
++			continue;
++		if (cvm_ipfwd_check_timestamp(e[i].s.timestamp, e[i].s.cache_flush_stamp) == CVM_IPFWD_EXPIRED)
++			continue;
++		fi = phys_to_virt(e[i].s.flow_info << 2);
++		in = dev_get_by_index_rcu(&init_net, fi->rx_ifindex);
++		ports = ntohl(fi->ports);
++		seq_printf(s, "%d %u %s %s ", ip6 ? 6 : 4, e[i].s.ip_proto,
++			   in ? in->name : "-", fi->dev ? fi->dev->name : "-");
++		if (ip6) {
++			u64 a[2], b[2], c[2], d[2];
++
++			a[0] = e[i].s.ip_saddrhi; a[1] = e[i].s.ip_saddrlo;
++			b[0] = e[i].s.ip_daddrhi; b[1] = e[i].s.ip_daddrlo;
++			c[0] = fi->ip_saddrhi;    c[1] = fi->ip_saddrlo;
++			d[0] = fi->ip_daddrhi;    d[1] = fi->ip_daddrlo;
++			seq_printf(s, "%pI6c %u %pI6c %u %pI6c %u %pI6c %u",
++				   a, ntohs(e[i].s.l4_sport), b, ntohs(e[i].s.l4_dport),
++				   c, ports >> 16, d, ports & 0xffff);
++		} else {
++			seq_printf(s, "%pI4 %u %pI4 %u %pI4 %u %pI4 %u",
++				   &e[i].s.ip_saddr, ntohs(e[i].s.l4_sport), &e[i].s.ip_daddr, ntohs(e[i].s.l4_dport),
++				   &fi->ip_saddr, ports >> 16, &fi->ip_daddr, ports & 0xffff);
++		}
++		seq_printf(s, " %u %u\n", e[i].s.vlan_id,
++			   jiffies_to_msecs((now - (u32)e[i].s.timestamp) & CMV_IPFWD_TIMER_MAX));
++	}
++	rcu_read_unlock();
++	return 0;
++}
++
++static const struct seq_operations flows_seq_ops = {
++	.start = flows_seq_start,
++	.next  = flows_seq_next,
++	.stop  = flows_seq_stop,
++	.show  = flows_seq_show
++};
++
++static int flows_open(struct inode *inode, struct file *file)
++{
++	return seq_open(file, &flows_seq_ops);
++}
++
++static const struct ipfwd_proc_ops flows_file_ops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN    = flows_open,
++	IPFWD_PROC_READ    = seq_read,
++	IPFWD_PROC_LSEEK   = seq_lseek,
++	IPFWD_PROC_RELEASE = seq_release
++};
++
+ static int __init ipfwd_init(void)
+ {
+ 	int ret = 0, idx;
+@@ -4858,6 +4968,8 @@ static int __init ipfwd_init(void)
+         if (export_init() != 0)
+             goto ipfwd_init_failed;
+ #endif
++	if (!proc_create("cavium/flows", 0600, NULL, &flows_file_ops))
++		pr_warn("Failed to create /proc/cavium/flows\n");	/* UI view only, not fatal */
+ 
+ 	return 0;
+ 
+@@ -4894,6 +5006,7 @@ static void __exit ipfwd_exit(void)
+ #ifdef FLOW_COUNTERS
+         export_exit();
+ #endif
++	remove_proc_entry("cavium/flows", NULL);
+ 
+ 	cvm_ipfwd_rx_hook = NULL;
+ 	cvm_ipfwd_tx_hook = NULL;
+-- 
+2.47.3
+

@@ -1,0 +1,218 @@
+From 0eba79675aa5dfbc3804f7610bb03feccfc39ad5 Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 23:20:18 -0500
+Subject: [PATCH 04/18] Invalidate cached flows on policy, route, address and link changes
+
+Bump the cache flush stamp (O(1); every entry looks expired at its next
+lookup) from:
+- the kernel's offload flush hook (nftables commit, iptables replace),
+  when the kernel provides it (CVM_IPFWD_HAVE_FLUSH_HOOK)
+- FIB, IPv4/IPv6 address and netdevice notifiers (WAN renumbering,
+  route changes, links going up/down)
+
+Bump once immediately and again after synchronize_net() from a work
+item, so a packet that passed the old ruleset and is still on its way to
+the tx hook can't re-cache its flow with the new stamp. The stamp is 8
+bits; on wrap the work item also wipes both caches, with offload paused
+across a grace period (a proper wait, unlike the existing cvmx_wait()).
+
+Measured: a flow blocked mid-stream by a new nft rule stops within 0.5 s
+(was ~11 s).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ipfwd.c | 157 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 157 insertions(+)
+
+diff --git a/ipfwd.c b/ipfwd.c
+index 7e7956e..be0b1c1 100644
+--- a/ipfwd.c
++++ b/ipfwd.c
+@@ -16,6 +16,10 @@
+ * NONINFRINGEMENT.  See the GNU General Public License for more details.
+ ***********************************************************************/
+ 
++#include <linux/inetdevice.h>
++#include <linux/workqueue.h>
++#include <net/addrconf.h>
++#include <net/fib_notifier.h>
+ #include <linux/module.h>
+ #include <linux/kernel.h>
+ #include <linux/types.h>
+@@ -4304,6 +4308,151 @@ void cvm_ipv6_fwd_cleanup(void)
+ 	/* Clean IPv6 proc entries */
+ 	cvm_ipv6_clean_proc();
+ }
++/*
++ * Invalidate offloaded flows when forwarding policy or routing changes.
++ *
++ * The engine only re-checks a cached flow occasionally (random slow-path
++ * samples once it is "old", and expiry after NEW+OLD lifetime, 16 s at HZ=100),
++ * so without this a newly added firewall rule could be bypassed for seconds.
++ * Bumping cvm_gbl_ipfwd_cache_flush_stamp makes every existing entry look
++ * expired at its next lookup.
++ *
++ * Triggers: the kernel's cvm_offload_invalidate() (nftables commit, iptables
++ * table replace) when available, plus route, address and link changes.
++ *
++ * Two bumps: one immediately, and one after an RCU grace period. A packet that
++ * was filtered by the old ruleset may still be on its way to the tx hook and
++ * would cache its flow with the new stamp; after synchronize_net() no such
++ * packet can remain. The 8-bit stamp wraps after 256 bumps, at which point
++ * entries stamped 256 flushes ago would look valid again, so on wrap the work
++ * item also wipes both caches (with offload paused around a grace period).
++ */
++static DEFINE_SPINLOCK(cvm_ipfwd_inval_lock);
++static bool cvm_ipfwd_inval_wrapped;
++static atomic_long_t cvm_ipfwd_invalidations = ATOMIC_LONG_INIT(0);
++
++static void cvm_ipfwd_bump_stamp(void)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&cvm_ipfwd_inval_lock, flags);
++	if (++cvm_gbl_ipfwd_cache_flush_stamp == 0)
++		cvm_ipfwd_inval_wrapped = true;
++	CVMX_SYNCW;
++	spin_unlock_irqrestore(&cvm_ipfwd_inval_lock, flags);
++}
++
++static void cvm_ipfwd_inval_work_fn(struct work_struct *work)
++{
++	bool wrapped;
++	unsigned long flags;
++
++	synchronize_net();
++	cvm_ipfwd_bump_stamp();
++
++	spin_lock_irqsave(&cvm_ipfwd_inval_lock, flags);
++	wrapped = cvm_ipfwd_inval_wrapped;
++	cvm_ipfwd_inval_wrapped = false;
++	spin_unlock_irqrestore(&cvm_ipfwd_inval_lock, flags);
++
++	if (wrapped) {
++		bool v4 = cvm_ipv4_fwd, v6 = cvm_ipv6_fwd;
++
++		cvm_ipv4_fwd = false;
++		cvm_ipv6_fwd = false;
++		clear_ipv4_bit(ipfwd_flags);
++		clear_ipv6_bit(ipfwd_flags);
++		CVMX_SYNC;
++		synchronize_net();	/* no fast-path reader left */
++		if (cvm_gbl_ipv4_fwd_cache)
++			cvm_ipfwd_flush_cache(cvm_gbl_ipv4_fwd_cache, ipv4_cache_size, CVM_IPFWD_ENTRIES_PER_BUCKET);
++		if (cvm_gbl_ipv6_fwd_cache)
++			cvm_ipfwd_flush_cache(cvm_gbl_ipv6_fwd_cache, ipv6_cache_size, CVM_IPFWD_ENTRIES_PER_BUCKET);
++		cvm_ipv4_fwd = v4;
++		cvm_ipv6_fwd = v6;
++		if (v4)
++			set_ipv4_bit(ipfwd_flags);
++		if (v6)
++			set_ipv6_bit(ipfwd_flags);
++		CVMX_SYNCW;
++		incr_ipfwd_flow_stat(IPV4_FLUSHES);
++	}
++}
++static DECLARE_WORK(cvm_ipfwd_inval_work, cvm_ipfwd_inval_work_fn);
++
++/* Safe from any context */
++static void cvm_ipfwd_invalidate(void)
++{
++	atomic_long_inc(&cvm_ipfwd_invalidations);
++	cvm_ipfwd_bump_stamp();
++	schedule_work(&cvm_ipfwd_inval_work);
++}
++
++static int cvm_ipfwd_netdev_event(struct notifier_block *nb, unsigned long event, void *ptr)
++{
++	switch (event) {
++	case NETDEV_UP:
++	case NETDEV_DOWN:
++	case NETDEV_CHANGE:
++	case NETDEV_CHANGEADDR:
++	case NETDEV_CHANGEMTU:
++	case NETDEV_CHANGEUPPER:
++	case NETDEV_UNREGISTER:
++		cvm_ipfwd_invalidate();
++	}
++	return NOTIFY_DONE;
++}
++
++static int cvm_ipfwd_addr_event(struct notifier_block *nb, unsigned long event, void *ptr)
++{
++	cvm_ipfwd_invalidate();
++	return NOTIFY_DONE;
++}
++
++static int cvm_ipfwd_fib_event(struct notifier_block *nb, unsigned long event, void *ptr)
++{
++	cvm_ipfwd_invalidate();
++	return NOTIFY_DONE;
++}
++
++static struct notifier_block cvm_ipfwd_netdev_nb = { .notifier_call = cvm_ipfwd_netdev_event };
++static struct notifier_block cvm_ipfwd_inetaddr_nb = { .notifier_call = cvm_ipfwd_addr_event };
++static struct notifier_block cvm_ipfwd_inet6addr_nb = { .notifier_call = cvm_ipfwd_addr_event };
++static struct notifier_block cvm_ipfwd_fib_nb = { .notifier_call = cvm_ipfwd_fib_event };
++
++static int cvm_ipfwd_invalidate_init(void)
++{
++	int ret;
++
++	ret = register_netdevice_notifier(&cvm_ipfwd_netdev_nb);
++	if (ret)
++		return ret;
++	register_inetaddr_notifier(&cvm_ipfwd_inetaddr_nb);
++	register_inet6addr_notifier(&cvm_ipfwd_inet6addr_nb);
++	ret = register_fib_notifier(&init_net, &cvm_ipfwd_fib_nb, NULL, NULL);
++	if (ret)
++		pr_warn("ipfwd: no FIB notifier (%d); route changes rely on flow expiry\n", ret);
++#ifdef CVM_IPFWD_HAVE_FLUSH_HOOK
++	WRITE_ONCE(cvm_ipfwd_flush_hook, cvm_ipfwd_invalidate);
++#else
++	pr_warn("ipfwd: kernel has no offload flush hook; firewall changes rely on flow expiry\n");
++#endif
++	return 0;
++}
++
++static void cvm_ipfwd_invalidate_exit(void)
++{
++#ifdef CVM_IPFWD_HAVE_FLUSH_HOOK
++	WRITE_ONCE(cvm_ipfwd_flush_hook, NULL);
++#endif
++	unregister_fib_notifier(&init_net, &cvm_ipfwd_fib_nb);
++	unregister_inet6addr_notifier(&cvm_ipfwd_inet6addr_nb);
++	unregister_inetaddr_notifier(&cvm_ipfwd_inetaddr_nb);
++	unregister_netdevice_notifier(&cvm_ipfwd_netdev_nb);
++	synchronize_net();
++	flush_work(&cvm_ipfwd_inval_work);
++}
++
+ static int __init ipfwd_init(void)
+ {
+ 	int ret = 0, idx;
+@@ -4377,6 +4526,12 @@ static int __init ipfwd_init(void)
+ 	cvm_ipfwd_rx_hook = pkt_receive;
+ 	cvm_ipfwd_tx_hook = pkt_cache;
+ 
++	ret = cvm_ipfwd_invalidate_init();
++	if (ret) {
++		pr_err("Failed to register invalidation notifiers\n");
++		goto ipfwd_init_failed;
++	}
++
+ #ifdef CVM_QOS_POLICER
+ 	cvm_qos_policer_init();
+ #endif
+@@ -4416,6 +4571,8 @@ static void __exit ipfwd_exit(void)
+ 	int idx;
+ 	struct net_device *dev = NULL;
+ 
++	cvm_ipfwd_invalidate_exit();
++
+ 	ipfwd_flags = 0;
+ 	CVMX_SYNC;
+ 
+-- 
+2.47.3
+

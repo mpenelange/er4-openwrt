@@ -1,0 +1,68 @@
+From fc57c81f68fec5ce04865b77b222801c13f7c748 Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 20:21:26 -0500
+Subject: [PATCH 02/18] Build against Linux 5.4 (Oracle UEK6) without DPI
+
+- ipfwd.c: VLAN_TAG_PRESENT was removed in 5.0; use
+  __vlan_hwaccel_put_tag(), which also sets skb->vlan_present
+- Makefile: drop -DDPI; it needs rx_dpi_1/rx_dpi_2/tx_dpi/is_app_int
+  from UBNT's proprietary ubnt_nf_app.ko
+- .gitignore build products
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .gitignore | 9 +++++++++
+ Makefile   | 4 ++--
+ ipfwd.c    | 5 +++--
+ 3 files changed, 14 insertions(+), 4 deletions(-)
+ create mode 100644 .gitignore
+
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..f70eb74
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,9 @@
++*.o
++*.ko
++*.mod
++*.mod.c
++*.cmd
++.*.cmd
++modules.order
++Module.symvers
++.tmp_versions/
+diff --git a/Makefile b/Makefile
+index 18ab874..40fb854 100644
+--- a/Makefile
++++ b/Makefile
+@@ -91,8 +91,8 @@ ccflags-y += -DIPFWD_IPV4_BONDING -DIPFWD_IPV6_BONDING
+ # per flow pkt/byte counters
+ ccflags-y += -DFLOW_COUNTERS
+ 
+-# DPI
+-ccflags-y += -DDPI
++# DPI: needs UBNT's proprietary ubnt_nf_app.ko (Trend Micro engine), not available here
++#ccflags-y += -DDPI
+ 
+ # version number (major.minor)
+ ccflags-y += -DMAJOR_NUMBER=6 -DMINOR_NUMBER=1
+diff --git a/ipfwd.c b/ipfwd.c
+index 9680c53..fcd869a 100644
+--- a/ipfwd.c
++++ b/ipfwd.c
+@@ -2263,8 +2263,9 @@ transmit_pkt:
+ 		if (flow_info->pkt_flags) {
+ 			if (test_vlan_hdr(&flow_info->pkt_flags)) {
+ 				if ( ! PLATFORM_VLAN_HDR_IN_PKT ) {
+-					skb->vlan_proto = flow_info->vlan_proto;
+-					skb->vlan_tci = VLAN_TAG_PRESENT | flow_info->vlan_tag;
++					/* 5.0 dropped VLAN_TAG_PRESENT in favour of skb->vlan_present */
++					__vlan_hwaccel_put_tag(skb, flow_info->vlan_proto,
++							       flow_info->vlan_tag);
+ 				}
+ 			}
+ 
+-- 
+2.47.3
+

@@ -1,0 +1,22 @@
+# EdgeRouter 4 with the Octeon SDK ethernet driver: ports are named after the front panel
+# (uek7 patch 0008): eth0..eth2 RJ45, eth3 = SFP.
+. /lib/functions/uci-defaults.sh
+
+board_config_update
+
+case "$(board_name)" in
+ubnt,edgerouter-4)
+	# No switch chip: bridged ports are switched by the CPU (slow, never offloaded). So no
+	# br-lan: lan is eth1 on its own ('device', not 'ports', which would make a 1-port bridge);
+	# eth2/eth3 stay unassigned until given their own routed network.
+	ucidef_set_interface "lan" device "eth1" protocol static
+	ucidef_set_interface_wan "eth0"
+	;;
+*)
+	ucidef_set_interfaces_lan_wan "eth1" "eth0"
+	;;
+esac
+
+board_config_flush
+
+exit 0

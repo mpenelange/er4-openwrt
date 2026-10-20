@@ -1,0 +1,8 @@
+# IPv6 reverse-path filter (IPv4 has the kernel's rp_filter; IPv6 has nothing by default): drop a
+# packet whose source address isn't routed back out the port it came in on. Without it, a frame
+# from the WAN carrying a LAN host's address and an offloaded flow's tuple was forwarded: the
+# fast path refuses it (wrong ingress port), but conntrack is liberal about TCP windows for
+# offloaded flows (they see only sampled packets), so the slow path took it as established
+# (found by a replay test). Source-specific defaults still match: the lookup uses the
+# packet's destination as the source. "::" is DAD and router solicitation.
+meta nfproto ipv6 ip6 saddr != :: fib saddr . iif oif missing counter drop comment "!er4: IPv6 reverse path"

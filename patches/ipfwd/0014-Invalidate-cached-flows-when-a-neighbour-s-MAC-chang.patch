@@ -1,0 +1,137 @@
+From 411591ccfc618f5316b760d38700d41a3b28cd56 Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 22:21:23 -0500
+Subject: [PATCH 14/18] Invalidate cached flows when a neighbour's MAC changes
+
+A cached flow carries its next hop's MAC, so after an ARP/ND change it
+kept sending to the old MAC until the entry expired (~16 s). Listen for
+NETEVENT_NEIGH_UPDATE, remember the last MAC per neighbour in a small
+lossy table, and invalidate only when it actually changes: the kernel
+also sends this event on every routine REACHABLE/STALE/DELAY transition,
+and invalidating on those would keep punting every flow.
+
+Tested on the ER-4: 90 s of neighbour state churn caused no
+invalidations; each MAC change caused exactly one.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ipfwd.c | 74 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 73 insertions(+), 1 deletion(-)
+
+diff --git a/ipfwd.c b/ipfwd.c
+index a83e6a0..28453ec 100644
+--- a/ipfwd.c
++++ b/ipfwd.c
+@@ -21,6 +21,9 @@
+ #include <linux/mutex.h>
+ #include <net/addrconf.h>
+ #include <net/fib_notifier.h>
++#include <net/netevent.h>
++#include <net/neighbour.h>
++#include <linux/jhash.h>
+ #include <linux/module.h>
+ #include <linux/kernel.h>
+ #include <linux/types.h>
+@@ -4618,7 +4621,8 @@ static void cvm_ipfwd_inval_work_fn(struct work_struct *work)
+ static DECLARE_WORK(cvm_ipfwd_inval_work, cvm_ipfwd_inval_work_fn);
+ 
+ /* Safe from any context. Also reachable from userspace via /proc/cavium/invalidate,
+- * e.g. after deleting conntrack entries (no kernel hook fires for that).
++ * e.g. after deleting conntrack entries (no kernel hook fires for that; 5.15 allows
++ * one conntrack event notifier and ctnetlink owns it).
+  */
+ void cvm_ipfwd_invalidate(void)
+ {
+@@ -4654,7 +4658,73 @@ static int cvm_ipfwd_fib_event(struct notifier_block *nb, unsigned long event, v
+ 	return NOTIFY_DONE;
+ }
+ 
++/*
++ * Neighbour (ARP/ND) changes. A cached flow carries its next hop's MAC in its
++ * L2 header, so after that MAC changes the flow keeps sending to the old one
++ * until it expires (~16 s). The kernel signals NETEVENT_NEIGH_UPDATE on every
++ * neighbour state change, including the routine REACHABLE/STALE/DELAY cycle
++ * each host goes through every few tens of seconds, so invalidating on each
++ * would keep punting every flow. Instead remember the last MAC seen per
++ * neighbour and invalidate only when it changes. The table is small and lossy:
++ * a neighbour pushed out by a collision is re-learned on its next event, and a
++ * MAC change missed that way waits for expiry as before.
++ */
++#define CVM_IPFWD_NEIGH_SLOTS	256
++
++struct cvm_ipfwd_neigh_slot {
++	int	ifindex;
++	u8	family;
++	u8	key[sizeof(struct in6_addr)];
++	u8	ha[ETH_ALEN];
++};
++
++static struct cvm_ipfwd_neigh_slot cvm_ipfwd_neigh_slots[CVM_IPFWD_NEIGH_SLOTS];
++static DEFINE_SPINLOCK(cvm_ipfwd_neigh_lock);
++
++static int cvm_ipfwd_netevent(struct notifier_block *nb, unsigned long event, void *ptr)
++{
++	struct neighbour *n = ptr;
++	struct cvm_ipfwd_neigh_slot *slot;
++	unsigned int keylen = n->tbl->key_len;
++	int family = n->tbl->family;
++	u8 ha[ETH_ALEN];
++	bool changed = false;
++	unsigned long flags;
++
++	if (event != NETEVENT_NEIGH_UPDATE)
++		return NOTIFY_DONE;
++	if ((family != AF_INET && family != AF_INET6) || keylen > sizeof(slot->key))
++		return NOTIFY_DONE;
++	if (n->dev->addr_len != ETH_ALEN || !(READ_ONCE(n->nud_state) & NUD_VALID))
++		return NOTIFY_DONE;
++
++	neigh_ha_snapshot(ha, n, n->dev);
++	slot = &cvm_ipfwd_neigh_slots[jhash(n->primary_key, keylen, n->dev->ifindex) % CVM_IPFWD_NEIGH_SLOTS];
++
++	spin_lock_irqsave(&cvm_ipfwd_neigh_lock, flags);
++	if (slot->ifindex == n->dev->ifindex && slot->family == family &&
++	    !memcmp(slot->key, n->primary_key, keylen)) {
++		changed = memcmp(slot->ha, ha, ETH_ALEN) != 0;
++	} else {
++		slot->ifindex = n->dev->ifindex;
++		slot->family = family;
++		memcpy(slot->key, n->primary_key, keylen);
++	}
++	memcpy(slot->ha, ha, ETH_ALEN);
++	spin_unlock_irqrestore(&cvm_ipfwd_neigh_lock, flags);
++
++	if (changed) {
++		if (family == AF_INET)
++			pr_info_ratelimited("ipfwd: neighbour %pI4 on %s is now %pM, invalidating\n", n->primary_key, n->dev->name, ha);
++		else
++			pr_info_ratelimited("ipfwd: neighbour %pI6c on %s is now %pM, invalidating\n", n->primary_key, n->dev->name, ha);
++		cvm_ipfwd_invalidate();
++	}
++	return NOTIFY_DONE;
++}
++
+ static struct notifier_block cvm_ipfwd_netdev_nb = { .notifier_call = cvm_ipfwd_netdev_event };
++static struct notifier_block cvm_ipfwd_netevent_nb = { .notifier_call = cvm_ipfwd_netevent };
+ static struct notifier_block cvm_ipfwd_inetaddr_nb = { .notifier_call = cvm_ipfwd_addr_event };
+ static struct notifier_block cvm_ipfwd_inet6addr_nb = { .notifier_call = cvm_ipfwd_addr_event };
+ static struct notifier_block cvm_ipfwd_fib_nb = { .notifier_call = cvm_ipfwd_fib_event };
+@@ -4668,6 +4738,7 @@ static int cvm_ipfwd_invalidate_init(void)
+ 		return ret;
+ 	register_inetaddr_notifier(&cvm_ipfwd_inetaddr_nb);
+ 	register_inet6addr_notifier(&cvm_ipfwd_inet6addr_nb);
++	register_netevent_notifier(&cvm_ipfwd_netevent_nb);
+ 	ret = register_fib_notifier(&init_net, &cvm_ipfwd_fib_nb, NULL, NULL);
+ 	if (ret)
+ 		pr_warn("ipfwd: no FIB notifier (%d); route changes rely on flow expiry\n", ret);
+@@ -4685,6 +4756,7 @@ static void cvm_ipfwd_invalidate_exit(void)
+ 	WRITE_ONCE(cvm_ipfwd_flush_hook, NULL);
+ #endif
+ 	unregister_fib_notifier(&init_net, &cvm_ipfwd_fib_nb);
++	unregister_netevent_notifier(&cvm_ipfwd_netevent_nb);
+ 	unregister_inet6addr_notifier(&cvm_ipfwd_inet6addr_nb);
+ 	unregister_inetaddr_notifier(&cvm_ipfwd_inetaddr_nb);
+ 	unregister_netdevice_notifier(&cvm_ipfwd_netdev_nb);
+-- 
+2.47.3
+

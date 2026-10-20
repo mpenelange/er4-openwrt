@@ -1,0 +1,35 @@
+/* DNS page. The lookup path borrows the firewall zone map's look: surface-2 nodes, accent arrows. */
+.lookup { display: grid; grid-template-columns: auto 28px minmax(0, 1fr) 40px minmax(0, 1fr) 40px minmax(0, 1fr); align-items: stretch; }
+.lk-query { display: flex; align-items: center; gap: 5px; font-size: var(--fs-sm); color: var(--text-muted); }
+.lk-node {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0;
+  padding: var(--sp-2) 10px; font: inherit; color: var(--text-primary); text-align: left; cursor: pointer;
+  background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: var(--radius);
+}
+.lk-node:hover { border-color: var(--accent); }
+.lk-title { display: flex; align-items: center; gap: 6px; font-weight: 650; }
+.lk-title b { font-weight: 650; color: var(--text-secondary); }
+.lk-line { max-width: 100%; font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.lk-arrow { position: relative; display: flex; align-items: center; }
+.lk-arrow i { flex: 1; height: 2px; margin-right: 6px; background: var(--accent); position: relative; }
+.lk-arrow i::after { content: ''; position: absolute; right: -6px; top: -4px; border: 5px solid transparent; border-left: 6px solid var(--accent); border-right: 0; }
+.lk-arrow-label { position: absolute; left: 0; right: 0; top: calc(50% - 18px); text-align: center; font-size: var(--fs-xs); color: var(--text-muted); }
+@media (max-width: 600px) {
+  .lookup { grid-template-columns: 1fr; }
+  .lk-arrow { height: 22px; justify-content: center; }
+  .lk-arrow i { flex: none; width: 2px; height: 100%; margin: 0 0 6px; }
+  .lk-arrow i::after { right: -4px; top: auto; bottom: -6px; border: 5px solid transparent; border-top: 6px solid var(--accent); border-bottom: 0; }
+  .lk-arrow-label { top: 2px; left: calc(50% + 8px); text-align: left; }
+}
+
+.dns-search { width: 140px; }
+.dns-table td { white-space: nowrap; }
+.dns-table td:nth-child(3) { white-space: normal; }
+.rtype { display: inline-block; min-width: 52px; padding: 0 5px; font-size: var(--fs-xs); font-weight: 650; letter-spacing: 0.04em; line-height: 18px; text-align: center; border-radius: 3px; background: var(--surface-3); color: var(--text-secondary); }
+.rtype.cname { background: var(--accent-soft); color: var(--text-primary); }
+.rtype.address { box-shadow: inset 0 0 0 1px var(--border-strong); background: var(--surface-2); }
+.rtype.forward { box-shadow: inset 0 0 0 1px var(--border-strong); background: transparent; }
+.dns-server { height: var(--row-h); padding: 0 var(--sp-2); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.dns-domain-preview { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: var(--fs-sm); color: var(--text-secondary); }
+.dns-domain-preview b { font-weight: 600; color: var(--text-primary); }
+.dns-server.locked { background: var(--surface-2); color: var(--text-secondary); cursor: default; }

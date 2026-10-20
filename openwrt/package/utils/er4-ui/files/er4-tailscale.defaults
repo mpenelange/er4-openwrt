@@ -1,0 +1,8 @@
+#!/bin/sh
+# Tailscale ships enabled; on this router it stays off until it's set up on the VPN page
+# (er4.tailscale_up enables it). Runs once per fresh /etc; a set-up node keeps its state.
+[ -x /etc/init.d/tailscale ] || exit 0
+[ -s /etc/tailscale/tailscaled.state ] && exit 0
+/etc/init.d/tailscale stop 2>/dev/null
+/etc/init.d/tailscale disable
+exit 0

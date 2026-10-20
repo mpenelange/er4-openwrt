@@ -1,0 +1,41 @@
+#!/bin/sh /etc/rc.common
+# Loads cavium-ip-offload with the options from /etc/config/offload.
+# The kernel invalidates offloaded flows on firewall (nft/iptables) commits, route and
+# neighbour changes; after a manual 'conntrack -D/-F', write 1 to /proc/cavium/invalidate.
+
+START=21
+STOP=89
+
+MOD=cavium-ip-offload
+
+knob() { # <uci option> <proc file>
+	local v
+	config_get v global "$1" 0
+	[ -w "$2" ] && echo "$v" > "$2"
+}
+
+start() {
+	local enabled stats
+	config_load offload
+	config_get_bool enabled global enabled 1
+	[ "$enabled" = 1 ] || return 0
+	grep -q '^cavium_ip_offload ' /proc/modules || insmod "$MOD" || return 1
+	knob ipv4 /proc/cavium/ipv4/fwd
+	knob vlan /proc/cavium/ipv4/vlan
+	knob pppoe /proc/cavium/ipv4/pppoe
+	knob ipv6 /proc/cavium/ipv6/fwd
+	knob vlan /proc/cavium/ipv6/vlan
+	knob pppoe /proc/cavium/ipv6/pppoe
+	config_get_bool stats global stats 0
+	echo "$stats" > /proc/cavium/stats
+}
+
+stop() {
+	grep -q '^cavium_ip_offload ' /proc/modules && rmmod "$MOD"
+	return 0
+}
+
+reload() {
+	stop
+	start
+}

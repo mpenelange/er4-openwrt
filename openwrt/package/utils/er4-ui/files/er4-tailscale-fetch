@@ -1,0 +1,55 @@
+#!/bin/sh
+# Install Tailscale's official static Linux build for this router (mips64, from
+# pkgs.tailscale.com) into /mnt/er4data/er4/tailscale, on the eMMC, so it survives reboots and
+# image updates. The image carries no Tailscale binary: from here on Tailscale updates itself
+# (tailscale set --auto-update), and its updater checks Tailscale's release signature.
+#   er4-tailscale-fetch          install the current stable release (the UI's "Set up")
+#   er4-tailscale-fetch --boot   at boot, for a set-up router whose binary is missing: retry until
+#                                the WAN is up, then start the service
+# Progress for the UI: /tmp/er4-tailscale-fetch holds "downloading", "ok <version>" or "error <message>".
+DIR=/mnt/er4data/er4/tailscale
+ST=/tmp/er4-tailscale-fetch
+LOCK=/tmp/er4-tailscale-fetch.pid
+PKGS=https://pkgs.tailscale.com/stable
+
+[ -f $LOCK ] && kill -0 "$(cat $LOCK)" 2>/dev/null && exit 0
+echo $$ > $LOCK
+T=
+trap 'rm -rf "$T" $LOCK' EXIT
+fail() { echo "error $*" > $ST; logger -t er4-tailscale "install failed: $*"; exit 1; }
+
+fetch() {
+	echo downloading > $ST
+	rm -rf "$T"; T=$(mktemp -d /tmp/er4-ts.XXXXXX)
+	name=$(uclient-fetch -q -T 20 -O - "$PKGS/?mode=json" | jsonfilter -e '@.Tarballs.mips64')
+	case $name in
+	tailscale_*_mips64.tgz) ;;
+	'') echo "error can't reach pkgs.tailscale.com" > $ST; return 1 ;;
+	*) fail "unexpected file name: $name" ;;
+	esac
+	uclient-fetch -q -T 60 -O "$T/ts.tgz" "$PKGS/$name" || { echo "error download failed" > $ST; return 1; }
+	sum=$(uclient-fetch -q -T 20 -O - "$PKGS/$name.sha256") || { echo "error download failed" > $ST; return 1; }
+	[ "$(sha256sum "$T/ts.tgz" | cut -d' ' -f1)" = "$sum" ] || fail "checksum mismatch for $name"
+	tar -xzf "$T/ts.tgz" -C "$T" || fail "can't unpack $name"
+	src=$T/${name%.tgz}
+	mkdir -p $DIR || fail "can't create $DIR"
+	for b in tailscale tailscaled; do
+		cp "$src/$b" "$DIR/$b.new" && chmod 755 "$DIR/$b.new" || fail "can't write $DIR"
+	done
+	sync
+	mv "$DIR/tailscale.new" "$DIR/tailscale" && mv "$DIR/tailscaled.new" "$DIR/tailscaled" || fail "can't write $DIR"
+	echo "ok $("$DIR/tailscale" version | head -n 1)" > $ST
+	logger -t er4-tailscale "installed $name"
+}
+
+if [ "$1" = --boot ]; then
+	# up to an hour: the WAN may come up late
+	n=0
+	until fetch; do
+		n=$((n + 1)); [ $n -ge 120 ] && fail "gave up: pkgs.tailscale.com unreachable"
+		sleep 30
+	done
+	/etc/init.d/tailscale enabled && /etc/init.d/tailscale start
+else
+	fetch || exit 1
+fi

@@ -1,0 +1,79 @@
+From 5f6d89612b336d1833e457b7b7fdeb015afaf04b Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Sat, 10 Oct 2026 00:01:28 -0500
+Subject: [PATCH 06/18] Keep conntrack's TCP window tracking valid for offloaded flows
+
+Packets of an offloaded flow bypass conntrack, so its TCP window state
+goes stale. When the flow returned to the slow path (entry expiry at
+16 s, or a random sample), conntrack judged the current sequence numbers
+against the old window and marked them INVALID; behind a zone with
+forward=REJECT the connection was reset. On an ER-4, offloaded
+inter-VLAN TCP (VLAN 30 -> 40, fw4 zones) died at exactly 16 s every
+time, then stayed dead.
+
+EdgeOS avoids this by setting nf_conntrack_tcp_be_liberal=1 for every
+connection (EdgeOS firewall.init). Do what mainline's flowtable does on
+teardown (flow_offload_fixup_tcp()) instead: when caching a TCP flow,
+clear td_maxwin in both directions so conntrack re-learns the window
+from the next slow-path packet. Strict window checking stays on for
+everything else.
+
+Tested: same flow runs 60 s at 928 Mbit/s with be_liberal=0; the
+reverse (blocked) direction is still refused.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ipfwd.c | 28 +++++++++++++++++++++++++++-
+ 1 file changed, 27 insertions(+), 1 deletion(-)
+
+diff --git a/ipfwd.c b/ipfwd.c
+index 7a56acc..4203fe4 100644
+--- a/ipfwd.c
++++ b/ipfwd.c
+@@ -1178,6 +1178,30 @@ static inline int cvm_ipfwd_random_select(void)
+  * @param *bucket ptr to hash bucket
+  *
+  */
++#ifdef CONFIG_NETFILTER
++/*
++ * Packets of an offloaded flow bypass conntrack, so its TCP window tracking
++ * goes stale. When the flow comes back to the slow path (entry expired or a
++ * random sample), conntrack judges the current sequence numbers against that
++ * old window, marks them INVALID, and a firewall that doesn't accept them
++ * (e.g. a zone with forward=REJECT) resets the connection. Seen on an ER-4:
++ * offloaded inter-VLAN TCP died at exactly 16 s (the entry lifetime).
++ *
++ * Do what mainline's flowtable does on teardown (flow_offload_fixup_tcp()):
++ * clear td_maxwin so conntrack re-learns the window from the next packet it
++ * sees. UBNT instead set nf_conntrack_tcp_be_liberal=1 for every connection.
++ */
++static inline void cvm_ipfwd_ct_tcp_fixup(struct nf_conn *ct)
++{
++	if (nf_ct_protonum(ct) != IPPROTO_TCP)
++		return;
++	spin_lock_bh(&ct->lock);
++	ct->proto.tcp.seen[0].td_maxwin = 0;
++	ct->proto.tcp.seen[1].td_maxwin = 0;
++	spin_unlock_bh(&ct->lock);
++}
++#endif
++
+ static void cvm_ipfwd_mark_packet(void *ip, void *bucket, struct cvm_packet_info *cvm_info, bool ip6)
+ {
+ 	struct tcphdr *tcp;
+@@ -1942,9 +1966,11 @@ static int cvm_ipfwd_ip_cache_flow(struct sk_buff *skb, void *ip, bool ip6)
+ 		struct nf_conn_help *help =NULL;
+ 
+ 
+-		if ((ct = nf_ct_get (skb, &ctinfo)))
++		if ((ct = nf_ct_get (skb, &ctinfo))) {
+ 			if ((help = nfct_help(ct)))
+ 				return 0;
++			cvm_ipfwd_ct_tcp_fixup(ct);
++		}
+ 	}
+ #endif
+ 
+-- 
+2.47.3
+

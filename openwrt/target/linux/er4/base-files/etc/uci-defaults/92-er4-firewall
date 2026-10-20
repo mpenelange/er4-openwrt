@@ -1,0 +1,23 @@
+# Quieter WAN than OpenWrt's defaults (docs/security.md): drop instead of reject, so closed ports
+# don't answer; no ping from the internet (IPv4 or IPv6); no multicast (IGMP/MLD, only IPTV
+# needs it); no inbound IPsec forwarded to LAN hosts. DHCP renew, DHCPv6 and the ICMPv6 that
+# IPv6 needs (neighbour discovery, router adverts, errors) stay on.
+# Only while the WAN is still OpenWrt's stock setup (zone input REJECT, Allow-Ping untouched), so
+# a firewall someone has already tuned is left alone, also when this arrives with an update.
+sec() { uci -X -q show firewall | sed -n "s/^firewall\.\([^.]*\)\.name='$1'$/\1/p" | head -n 1; }
+wan=$(sec wan)
+ping=$(sec Allow-Ping)
+[ -n "$wan" ] && [ "$(uci -q get firewall.$wan.input)" = REJECT ] || exit 0
+[ -n "$ping" ] && [ -z "$(uci -q get firewall.$ping.enabled)" ] || exit 0
+
+uci set firewall.$wan.input=DROP
+for r in Allow-Ping Allow-IGMP Allow-MLD Allow-IPSec-ESP Allow-ISAKMP; do
+	s=$(sec $r)
+	[ -n "$s" ] && uci set firewall.$s.enabled=0
+done
+for r in Allow-ICMPv6-Input Allow-ICMPv6-Forward; do
+	s=$(sec $r)
+	[ -n "$s" ] && uci -q del_list firewall.$s.icmp_type=echo-request
+done
+uci commit firewall
+exit 0

@@ -1,0 +1,41 @@
+/* Readouts (components/readouts.tsx). Tokens only. */
+
+/* ---- meter: fill + lighter track of the same hue ---- */
+.meter { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+.meter-track { position: relative; flex: 1; min-width: 40px; height: 8px; border-radius: 4px; overflow: hidden;
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface-1)); }
+.meter.thin .meter-track { height: 6px; border-radius: 3px; }
+.meter-fill { height: 100%; border-radius: 0 4px 4px 0; background: var(--accent); transition: width 0.4s ease; }
+.meter.warning .meter-track { background: color-mix(in srgb, var(--warning) 22%, var(--surface-1)); }
+.meter.warning .meter-fill { background: var(--warning); }
+.meter.serious .meter-track { background: color-mix(in srgb, var(--serious) 22%, var(--surface-1)); }
+.meter.serious .meter-fill { background: var(--serious); }
+.meter.critical .meter-track { background: color-mix(in srgb, var(--critical) 22%, var(--surface-1)); }
+.meter.critical .meter-fill { background: var(--critical); }
+.meter-text { flex: none; font-size: var(--fs-sm); font-variant-numeric: tabular-nums; color: var(--text-secondary); white-space: nowrap; }
+
+/* ---- split bar: two parts, 2px surface gap ---- */
+.splitbar { display: flex; flex-direction: column; gap: 6px; }
+.splitbar-bar { display: flex; gap: 2px; height: 10px; }
+.splitbar-bar .seg { min-width: 2px; background: var(--accent); }
+.splitbar-bar .seg:first-child { border-radius: 4px 0 0 4px; }
+.splitbar-bar .seg:last-child { border-radius: 0 4px 4px 0; }
+.splitbar-bar .seg:only-child { border-radius: 4px; }
+.splitbar-bar .seg.neutral { background: var(--text-muted); opacity: 0.55; }
+.splitbar-bar .seg.none { background: var(--surface-3); }
+.splitbar-legend { display: flex; flex-wrap: wrap; gap: 2px var(--sp-3); font-size: var(--fs-xs); color: var(--text-secondary); }
+.splitbar-legend span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.splitbar-legend .sw { width: 8px; height: 8px; border-radius: 2px; background: var(--accent); }
+.splitbar-legend .sw.neutral { background: var(--text-muted); opacity: 0.55; }
+
+/* ---- key / value ---- */
+.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: var(--sp-3); margin: 0; font-size: var(--fs-md); }
+.kv.wide { grid-template-columns: 140px minmax(0, 1fr); }
+.kv dt { color: var(--text-muted); font-size: var(--fs-sm); line-height: 24px; white-space: nowrap; }
+.kv dd { margin: 0; min-width: 0; line-height: 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* ---- tabs ---- */
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none; }
+.tabs a { display: inline-flex; flex: none; white-space: nowrap; align-items: center; gap: 6px; height: 32px; padding: 0 var(--sp-3); margin-bottom: -1px; color: var(--text-secondary); border-bottom: 2px solid transparent; font-weight: 550; }
+.tabs a:hover { color: var(--text-primary); text-decoration: none; }
+.tabs a.on { color: var(--text-primary); border-bottom-color: var(--accent); }

@@ -1,0 +1,819 @@
+From 2852da09c6b234eeadcfda0636a4a773c208186a Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 22:50:34 -0500
+Subject: [PATCH 03/18] Build on Linux 5.15 (Oracle UEK7) as well as 5.4
+
+- ipfwd_compat.h: /proc files use struct proc_ops since 5.6; all 32
+  file_operations structs go through ipfwd_proc_ops/IPFWD_PROC_* macros
+- platform_bonding.c: bond->rr_tx_counter is per-CPU since 5.12
+
+Tested: loads and fast-paths on UEK7 5.15.0-er4 (ER-4, 824 kpps 64-byte
+routed, 0 drops, 29% CPU); still builds against UEK6 5.4.17-er4.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ export.c                               |  13 +-
+ ipfwd.c                                | 251 +++++++++++++------------
+ ipfwd_compat.h                         |  30 +++
+ ipfwd_filter.c                         |  15 +-
+ ipfwd_input_qos.c                      |  85 ++++-----
+ ipfwd_output_qos.c                     |  15 +-
+ ipfwd_proc.c                           |  69 +++----
+ ipfwd_proc.h                           |   3 +-
+ platform/octeon/src/platform_bonding.c |   6 +
+ 9 files changed, 265 insertions(+), 222 deletions(-)
+ create mode 100644 ipfwd_compat.h
+
+diff --git a/export.c b/export.c
+index 2bd7679..eb73cc4 100644
+--- a/export.c
++++ b/export.c
+@@ -5,6 +5,7 @@
+ #include <linux/fs.h>
+ #include <linux/seq_file.h>
+ 
++#include "ipfwd_compat.h"
+ #include "export.h"
+ #include "ipfwd.h"
+ 
+@@ -143,12 +144,12 @@ static int export_open(struct inode *inode, struct file *file)
+     return seq_open(file, &export_seq_ops);
+ }
+ 
+-static struct file_operations export_file_ops = {
+-    .owner   = THIS_MODULE,
+-    .open    = export_open,
+-    .read    = seq_read,
+-    .llseek  = seq_lseek,
+-    .release = seq_release
++static struct ipfwd_proc_ops export_file_ops = {
++    IPFWD_PROC_OWNER
++    IPFWD_PROC_OPEN    = export_open,
++    IPFWD_PROC_READ    = seq_read,
++    IPFWD_PROC_LSEEK  = seq_lseek,
++    IPFWD_PROC_RELEASE = seq_release
+ };
+ 
+ int export_init(void)
+diff --git a/ipfwd.c b/ipfwd.c
+index fcd869a..7e7956e 100644
+--- a/ipfwd.c
++++ b/ipfwd.c
+@@ -39,6 +39,7 @@
+ #include <uapi/linux/if.h>
+ #include <net/ip.h>
+ 
++#include "ipfwd_compat.h"
+ #include "ipfwd_common.h"
+  
+ #include "ipfwd_proc.h"
+@@ -145,12 +146,12 @@ static inline int  cvm_qos_policer_deinit(void);
+ static        int  cvm_qos_stats_open(struct inode *inode, struct file *file);
+ static        int  cvm_qos_stats_show(struct seq_file *file, void *ptr);
+ 
+-static struct file_operations cvm_qos_stats_operations = {
+-    .owner   = THIS_MODULE,
+-    .open    = cvm_qos_stats_open,
+-    .read    = seq_read,
+-    .llseek  = seq_lseek,
+-    .release = single_release,
++static struct ipfwd_proc_ops cvm_qos_stats_operations = {
++    IPFWD_PROC_OWNER
++    IPFWD_PROC_OPEN    = cvm_qos_stats_open,
++    IPFWD_PROC_READ    = seq_read,
++    IPFWD_PROC_LSEEK  = seq_lseek,
++    IPFWD_PROC_RELEASE = single_release,
+ };
+ 
+ 
+@@ -921,58 +922,58 @@ static ssize_t ipv6_fwd_ignore_cache_flush_write(struct file *file, const char _
+ 	return count;
+ }
+ 
+-static struct file_operations ipv4_cache_size_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipv4_fwd_cache_size_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.write		= ipv4_fwd_cache_size_write,
+-	.release	= single_release
++static struct ipfwd_proc_ops ipv4_cache_size_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipv4_fwd_cache_size_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_WRITE		= ipv4_fwd_cache_size_write,
++	IPFWD_PROC_RELEASE	= single_release
+ };
+ 
+-static struct file_operations ipv4_cache_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipv4_fwd_cache_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.write		= ipv4_fwd_cache_write,
+-	.release	= single_release,
++static struct ipfwd_proc_ops ipv4_cache_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipv4_fwd_cache_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_WRITE		= ipv4_fwd_cache_write,
++	IPFWD_PROC_RELEASE	= single_release,
+ };
+ 
+-static struct file_operations ipv4_ignore_cache_flush_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipv4_fwd_ignore_cache_flush_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.write		= ipv4_fwd_ignore_cache_flush_write,
+-	.release	= single_release
++static struct ipfwd_proc_ops ipv4_ignore_cache_flush_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipv4_fwd_ignore_cache_flush_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_WRITE		= ipv4_fwd_ignore_cache_flush_write,
++	IPFWD_PROC_RELEASE	= single_release
+ };
+ 
+-static struct file_operations ipv6_cache_size_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipv6_fwd_cache_size_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.write		= ipv6_fwd_cache_size_write,
+-	.release	= single_release
++static struct ipfwd_proc_ops ipv6_cache_size_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipv6_fwd_cache_size_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_WRITE		= ipv6_fwd_cache_size_write,
++	IPFWD_PROC_RELEASE	= single_release
+ };
+ 
+-static struct file_operations ipv6_cache_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipv6_fwd_cache_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.write		= ipv6_fwd_cache_write,
+-	.release	= single_release
++static struct ipfwd_proc_ops ipv6_cache_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipv6_fwd_cache_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_WRITE		= ipv6_fwd_cache_write,
++	IPFWD_PROC_RELEASE	= single_release
+ };
+ 
+-static struct file_operations ipv6_ignore_cache_flush_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipv6_fwd_ignore_cache_flush_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.write		= ipv6_fwd_ignore_cache_flush_write,
+-	.release	= single_release
++static struct ipfwd_proc_ops ipv6_ignore_cache_flush_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipv6_fwd_ignore_cache_flush_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_WRITE		= ipv6_fwd_ignore_cache_flush_write,
++	IPFWD_PROC_RELEASE	= single_release
+ };
+ 
+ /**
+@@ -3296,13 +3297,13 @@ err:
+ 	return size;
+ }
+ 
+-static const struct file_operations ipv4_fwd_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipv4_fwd_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
+-	.write		= ipv4_fwd_write,
++static const struct ipfwd_proc_ops ipv4_fwd_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipv4_fwd_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
++	IPFWD_PROC_WRITE		= ipv4_fwd_write,
+ };
+ 
+ #ifdef IPFWD_IPV4_PPPOE
+@@ -3351,13 +3352,13 @@ static ssize_t ipv4_pppoe_write(struct file *file, const char __user *input,
+ 	return size;
+ }
+ 
+-static const struct file_operations ipv4_pppoe_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipv4_pppoe_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
+-	.write		= ipv4_pppoe_write,
++static const struct ipfwd_proc_ops ipv4_pppoe_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipv4_pppoe_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
++	IPFWD_PROC_WRITE		= ipv4_pppoe_write,
+ };
+ #endif
+ 
+@@ -3406,13 +3407,13 @@ static ssize_t ipv4_vlan_write(struct file *file, const char __user *input,
+ 	return size;
+ }
+ 
+-static const struct file_operations ipv4_vlan_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipv4_vlan_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
+-	.write		= ipv4_vlan_write,
++static const struct ipfwd_proc_ops ipv4_vlan_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipv4_vlan_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
++	IPFWD_PROC_WRITE		= ipv4_vlan_write,
+ };
+ 
+ static int ipv4_gre_show(struct seq_file *s, void *v)
+@@ -3460,13 +3461,13 @@ static ssize_t ipv4_gre_write(struct file *file, const char __user *input,
+ 	return size;
+ }
+ 
+-static const struct file_operations ipv4_gre_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipv4_gre_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
+-	.write		= ipv4_gre_write,
++static const struct ipfwd_proc_ops ipv4_gre_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipv4_gre_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
++	IPFWD_PROC_WRITE		= ipv4_gre_write,
+ };
+ 
+ #ifdef IPFWD_IPV4_BONDING
+@@ -3515,13 +3516,13 @@ static ssize_t ipv4_bonding_write(struct file *file, const char __user *input,
+ 	return size;
+ }
+ 
+-static const struct file_operations ipv4_bonding_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipv4_bonding_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
+-	.write		= ipv4_bonding_write,
++static const struct ipfwd_proc_ops ipv4_bonding_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipv4_bonding_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
++	IPFWD_PROC_WRITE		= ipv4_bonding_write,
+ };
+ #endif
+ 
+@@ -3572,13 +3573,13 @@ static ssize_t ipv4_export_write(struct file *file, const char __user *input,
+ 	return size;
+ }
+ 
+-static const struct file_operations ipv4_export_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipv4_export_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
+-	.write		= ipv4_export_write,
++static const struct ipfwd_proc_ops ipv4_export_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipv4_export_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
++	IPFWD_PROC_WRITE		= ipv4_export_write,
+ };
+ #endif
+ 
+@@ -3628,13 +3629,13 @@ static ssize_t ipv4_dpi_write(struct file *file, const char __user *input,
+ 	return size;
+ }
+ 
+-static const struct file_operations ipv4_dpi_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipv4_dpi_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
+-	.write		= ipv4_dpi_write,
++static const struct ipfwd_proc_ops ipv4_dpi_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipv4_dpi_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
++	IPFWD_PROC_WRITE		= ipv4_dpi_write,
+ };
+ #endif
+ 
+@@ -3949,13 +3950,13 @@ err:
+ 	return size;
+ }
+ 
+-static const struct file_operations ipv6_fwd_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipv6_fwd_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
+-	.write		= ipv6_fwd_write,
++static const struct ipfwd_proc_ops ipv6_fwd_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipv6_fwd_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
++	IPFWD_PROC_WRITE		= ipv6_fwd_write,
+ };
+ 
+ #ifdef IPFWD_IPV6_PPPOE
+@@ -4004,13 +4005,13 @@ static ssize_t ipv6_pppoe_write(struct file *file, const char __user *input,
+ 	return size;
+ }
+ 
+-static const struct file_operations ipv6_pppoe_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipv6_pppoe_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
+-	.write		= ipv6_pppoe_write,
++static const struct ipfwd_proc_ops ipv6_pppoe_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipv6_pppoe_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
++	IPFWD_PROC_WRITE		= ipv6_pppoe_write,
+ };
+ #endif
+ 
+@@ -4059,13 +4060,13 @@ static ssize_t ipv6_vlan_write(struct file *file, const char __user *input,
+ 	return size;
+ }
+ 
+-static const struct file_operations ipv6_vlan_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipv6_vlan_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
+-	.write		= ipv6_vlan_write,
++static const struct ipfwd_proc_ops ipv6_vlan_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipv6_vlan_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
++	IPFWD_PROC_WRITE		= ipv6_vlan_write,
+ };
+ 
+ #ifdef IPFWD_IPV6_BONDING
+@@ -4114,13 +4115,13 @@ static ssize_t ipv6_bonding_write(struct file *file, const char __user *input,
+ 	return size;
+ }
+ 
+-static const struct file_operations ipv6_bonding_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipv6_bonding_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
+-	.write		= ipv6_bonding_write,
++static const struct ipfwd_proc_ops ipv6_bonding_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipv6_bonding_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
++	IPFWD_PROC_WRITE		= ipv6_bonding_write,
+ };
+ #endif
+ 
+diff --git a/ipfwd_compat.h b/ipfwd_compat.h
+new file mode 100644
+index 0000000..fec6ca0
+--- /dev/null
++++ b/ipfwd_compat.h
+@@ -0,0 +1,30 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * Kernel API compatibility for building on 5.4 (UEK6) and 5.15+ (UEK7).
++ */
++#ifndef __IPFWD_COMPAT_H__
++#define __IPFWD_COMPAT_H__
++
++#include <linux/version.h>
++#include <linux/proc_fs.h>
++
++/* 5.6 moved /proc files from struct file_operations to struct proc_ops */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
++#define ipfwd_proc_ops		proc_ops
++#define IPFWD_PROC_OWNER
++#define IPFWD_PROC_OPEN		.proc_open
++#define IPFWD_PROC_READ		.proc_read
++#define IPFWD_PROC_WRITE	.proc_write
++#define IPFWD_PROC_LSEEK	.proc_lseek
++#define IPFWD_PROC_RELEASE	.proc_release
++#else
++#define ipfwd_proc_ops		file_operations
++#define IPFWD_PROC_OWNER	.owner = THIS_MODULE,
++#define IPFWD_PROC_OPEN		.open
++#define IPFWD_PROC_READ		.read
++#define IPFWD_PROC_WRITE	.write
++#define IPFWD_PROC_LSEEK	.llseek
++#define IPFWD_PROC_RELEASE	.release
++#endif
++
++#endif /* __IPFWD_COMPAT_H__ */
+diff --git a/ipfwd_filter.c b/ipfwd_filter.c
+index 8d35c51..f21f377 100644
+--- a/ipfwd_filter.c
++++ b/ipfwd_filter.c
+@@ -27,6 +27,7 @@
+ 
+ #include <asm/uaccess.h>
+ 
++#include "ipfwd_compat.h"
+ #include "ipfwd_common.h"
+ #include "ipfwd_proc.h"
+ 
+@@ -555,13 +556,13 @@ static ssize_t cvm_ipfwd_filter_write(struct file *file, const char __user *buff
+ 	return count;
+ }
+ 
+-static struct file_operations cvm_ipfwd_filter_ops = {
+-	.owner		= THIS_MODULE,
+-	.open		= cvm_ipfwd_filter_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.write		= cvm_ipfwd_filter_write,
+-	.release	= single_release,
++static struct ipfwd_proc_ops cvm_ipfwd_filter_ops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= cvm_ipfwd_filter_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_WRITE		= cvm_ipfwd_filter_write,
++	IPFWD_PROC_RELEASE	= single_release,
+ };
+ 
+ static int cvm_ipfwd_filter_init_proc(void)
+diff --git a/ipfwd_input_qos.c b/ipfwd_input_qos.c
+index a503e1e..3eb6e35 100644
+--- a/ipfwd_input_qos.c
++++ b/ipfwd_input_qos.c
+@@ -25,6 +25,7 @@
+ #include <linux/proc_fs.h>
+ #endif
+ 
++#include "ipfwd_compat.h"
+ #include "ipfwd_common.h"
+ #include "ipfwd_proc.h"
+ 
+@@ -105,13 +106,13 @@ static ssize_t input_qos_enable_write(struct file *file, const char __user *inpu
+ 	return size;
+ }
+ 
+-static const struct file_operations input_qos_enable_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= input_qos_enable_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
+-	.write		= input_qos_enable_write,	
++static const struct ipfwd_proc_ops input_qos_enable_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= input_qos_enable_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
++	IPFWD_PROC_WRITE		= input_qos_enable_write,	
+ };
+ 
+ static int input_qos_red_avg_dly_show(struct seq_file *s, void *v)
+@@ -147,13 +148,13 @@ static ssize_t input_qos_red_avg_dly_write(struct file *file, const char __user
+ 	return size;
+ }
+ 
+-static const struct file_operations input_qos_red_avg_dly_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= input_qos_red_avg_dly_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
+-	.write		= input_qos_red_avg_dly_write,	
++static const struct ipfwd_proc_ops input_qos_red_avg_dly_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= input_qos_red_avg_dly_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
++	IPFWD_PROC_WRITE		= input_qos_red_avg_dly_write,	
+ };
+ 
+ static int input_qos_red_prb_dly_show(struct seq_file *s, void *v)
+@@ -189,13 +190,13 @@ static ssize_t input_qos_red_prb_dly_write(struct file *file, const char __user
+ 	return size;
+ }
+ 
+-static const struct file_operations input_qos_red_prb_dly_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= input_qos_red_prb_dly_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
+-	.write		= input_qos_red_prb_dly_write,	
++static const struct ipfwd_proc_ops input_qos_red_prb_dly_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= input_qos_red_prb_dly_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
++	IPFWD_PROC_WRITE		= input_qos_red_prb_dly_write,	
+ };
+ 
+ static int input_qos_assured_pct_show(struct seq_file *s, void *v)
+@@ -231,13 +232,13 @@ static ssize_t input_qos_assured_pct_write(struct file *file, const char __user
+ 	return size;
+ }
+ 
+-static const struct file_operations input_qos_assured_pct_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= input_qos_assured_pct_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
+-	.write		= input_qos_assured_pct_write,	
++static const struct ipfwd_proc_ops input_qos_assured_pct_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= input_qos_assured_pct_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
++	IPFWD_PROC_WRITE		= input_qos_assured_pct_write,	
+ };
+ 
+ static int input_qos_per_qos_pct_show(struct seq_file *s, void *v)
+@@ -273,13 +274,13 @@ static ssize_t input_qos_per_qos_pct_write(struct file *file, const char __user
+ 	return size;
+ }
+ 
+-static const struct file_operations input_qos_per_qos_pct_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= input_qos_per_qos_pct_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
+-	.write		= input_qos_per_qos_pct_write,	
++static const struct ipfwd_proc_ops input_qos_per_qos_pct_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= input_qos_per_qos_pct_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
++	IPFWD_PROC_WRITE		= input_qos_per_qos_pct_write,	
+ };
+ 
+ static int input_qos_watcher_open(struct inode *inode, struct file *file)
+@@ -416,13 +417,13 @@ static ssize_t input_qos_watcher_write(struct file *file, const char __user *inp
+ 
+ 	return size;
+ }
+-static const struct file_operations input_qos_watcher_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= input_qos_watcher_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
+-	.write		= input_qos_watcher_write,
++static const struct ipfwd_proc_ops input_qos_watcher_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= input_qos_watcher_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
++	IPFWD_PROC_WRITE		= input_qos_watcher_write,
+ };
+ 
+ static ipfwd_proc_entry_t input_qos_entries[] = {
+diff --git a/ipfwd_output_qos.c b/ipfwd_output_qos.c
+index a4ad36d..44d83ad 100644
+--- a/ipfwd_output_qos.c
++++ b/ipfwd_output_qos.c
+@@ -16,6 +16,7 @@
+ * NONINFRINGEMENT.  See the GNU General Public License for more details.
+ ***********************************************************************/
+ 
++#include "ipfwd_compat.h"
+ #include "ipfwd_output_qos.h"
+ 
+ #if (IPFWD_OUTPUT_QOS)
+@@ -95,13 +96,13 @@ static ssize_t output_qos_write(struct file *file, const char __user *input,
+ 
+ 	return size;
+ }
+-static const struct file_operations output_qos_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= output_qos_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
+-	.write		= output_qos_write,
++static const struct ipfwd_proc_ops output_qos_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= output_qos_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
++	IPFWD_PROC_WRITE		= output_qos_write,
+ };
+ 
+ int ipfwd_output_qos_init(void)
+diff --git a/ipfwd_proc.c b/ipfwd_proc.c
+index 01897a0..b023085 100644
+--- a/ipfwd_proc.c
++++ b/ipfwd_proc.c
+@@ -25,6 +25,7 @@
+ 
+ #include <asm/uaccess.h>
+ 
++#include "ipfwd_compat.h"
+ #include "ipfwd_common.h"
+ #include "ipfwd_proc.h"
+ 
+@@ -121,12 +122,12 @@ static int ipfwd_proc_open(struct inode *inode, struct file *file)
+ 	return single_open(file, ipfwd_show, NULL);
+ }
+ 
+-static const struct file_operations common_fwd_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipfwd_proc_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
++static const struct ipfwd_proc_ops common_fwd_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipfwd_proc_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
+ };
+ 
+ #if IPFWD_ENABLE_STATS
+@@ -421,13 +422,13 @@ static int ipfwd_stats_proc_open(struct inode *inode, struct file *file)
+ 	return single_open(file, ipfwd_stats_show, NULL);
+ }
+ 
+-static const struct file_operations common_stats_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipfwd_stats_proc_open,
+-	.read		= seq_read,
+-	.write		= ipfwd_stats_proc_write,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
++static const struct ipfwd_proc_ops common_stats_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipfwd_stats_proc_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_WRITE		= ipfwd_stats_proc_write,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
+ };
+ #endif /* IPFWD_ENABLE_STATS */
+ 
+@@ -495,22 +496,22 @@ static int ipfwd_old_lifetime_proc_open(struct inode *inode, struct file *file)
+ 	return single_open(file, ipfwd_old_lifetime_show, NULL);
+ }
+ 
+-static const struct file_operations common_new_lifetime_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipfwd_new_lifetime_proc_open,
+-	.read		= seq_read,
+-	.write		= ipfwd_new_lifetime_proc_write,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
++static const struct ipfwd_proc_ops common_new_lifetime_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipfwd_new_lifetime_proc_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_WRITE		= ipfwd_new_lifetime_proc_write,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
+ };
+ 
+-static const struct file_operations common_old_lifetime_proc_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipfwd_old_lifetime_proc_open,
+-	.read		= seq_read,
+-	.write		= ipfwd_old_lifetime_proc_write,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
++static const struct ipfwd_proc_ops common_old_lifetime_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipfwd_old_lifetime_proc_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_WRITE		= ipfwd_old_lifetime_proc_write,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
+ };
+ 
+ #ifdef CVM_IPFWD_MQUEUES_SUPPORT
+@@ -553,13 +554,13 @@ static ssize_t ipfwd_cvm_mq_write(struct file *file, const char __user *input,
+ 	return size;
+ }
+ 
+-static const struct file_operations ipfwd_cvm_mq_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= ipfwd_cvm_mq_open,
+-	.read		= seq_read,
+-        .write          = ipfwd_cvm_mq_write,
+-	.llseek		= seq_lseek,
+-	.release	= single_release,
++static const struct ipfwd_proc_ops ipfwd_cvm_mq_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipfwd_cvm_mq_open,
++	IPFWD_PROC_READ		= seq_read,
++        IPFWD_PROC_WRITE          = ipfwd_cvm_mq_write,
++	IPFWD_PROC_LSEEK		= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
+ };
+ 
+ #endif
+diff --git a/ipfwd_proc.h b/ipfwd_proc.h
+index dd1148c..60aadb0 100644
+--- a/ipfwd_proc.h
++++ b/ipfwd_proc.h
+@@ -19,6 +19,7 @@
+ #ifndef __IPFWD_PROC_H
+ #define __IPFWD_PROC_H
+ 
++#include "ipfwd_compat.h"
+ #include <linux/proc_fs.h>
+ 
+ /* common prefix used by pr_<> macros */
+@@ -61,7 +62,7 @@ extern struct ipfwd_proc_info ipfwd_proc;
+ typedef struct {
+ 	const char			*name;
+ 	umode_t				mode;
+-	const struct file_operations	*proc_fops;	
++	const struct ipfwd_proc_ops	*proc_fops;	
+ } ipfwd_proc_entry_t;
+ 
+ enum ipfwd_status {
+diff --git a/platform/octeon/src/platform_bonding.c b/platform/octeon/src/platform_bonding.c
+index 8ffea41..bbe6f06 100644
+--- a/platform/octeon/src/platform_bonding.c
++++ b/platform/octeon/src/platform_bonding.c
+@@ -16,6 +16,7 @@
+ * NONINFRINGEMENT.  See the GNU General Public License for more details.
+ ***********************************************************************/
+ 
++#include <linux/version.h>
+ #include "platform_api.h"
+ 
+ int platform_set_bonding_fastpath(struct sk_buff *skb, unsigned long* pkt_flags, 
+@@ -52,7 +53,12 @@ static int cvm_fastpath_bonding_roundrobin(struct sk_buff* skb, struct bonding*
+ 	struct list_head *iter;
+ 
+ 	do {
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
++		/* 5.12 made rr_tx_counter per-CPU (see bond_rr_gen_slave_id()) */
++		slave_no = this_cpu_inc_return(*bond->rr_tx_counter) % bond->slave_cnt;
++#else
+ 		slave_no = bond->rr_tx_counter++ % bond->slave_cnt;
++#endif
+ 		bond_for_each_slave(bond, slave, iter) {
+ 			if(--slave_no < 0) {
+ 				if( (slave->dev->flags & IFF_UP) && 
+-- 
+2.47.3
+

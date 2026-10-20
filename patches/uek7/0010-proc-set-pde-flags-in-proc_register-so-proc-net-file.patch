@@ -1,0 +1,102 @@
+From 3335ad6fd069965f1cd1d6d9e6a1e3a901f147b4 Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 15:47:19 -0500
+Subject: [PATCH 10/10] proc: set pde flags in proc_register() so /proc/net files keep lseek
+
+ff7ec8dc1b64 ("proc: use the same treatment to check proc_lseek as ones
+for proc_read_iter et.al") made proc_reg_open() clear FMODE_LSEEK unless
+PROC_ENTRY_proc_lseek is set, but proc_create_net_data() and friends never
+call pde_set_flags(). Every /proc/net file therefore fails lseek() with
+ESPIPE, and a reader that rewind()s gets an empty file the second time.
+odhcpd does exactly that with /proc/net/ipv6_route: it finds no default
+route after its first RA and advertises router lifetime 0, so LAN clients
+never get an IPv6 default route.
+
+Same fix as upstream ("proc: fix missing pde_set_flags() for net proc
+files"): set the flags in proc_register() for every regular entry.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ fs/proc/generic.c | 34 +++++++++++++++++-----------------
+ 1 file changed, 17 insertions(+), 17 deletions(-)
+
+diff --git a/fs/proc/generic.c b/fs/proc/generic.c
+index 4e093b67a..e8fcc5c3a 100644
+--- a/fs/proc/generic.c
++++ b/fs/proc/generic.c
+@@ -365,10 +365,27 @@ static const struct inode_operations proc_dir_inode_operations = {
+ 	.setattr	= proc_notify_change,
+ };
+ 
++static void pde_set_flags(struct proc_dir_entry *pde)
++{
++	if (pde->proc_ops->proc_flags & PROC_ENTRY_PERMANENT)
++		pde->flags |= PROC_ENTRY_PERMANENT;
++	if (pde->proc_ops->proc_read_iter)
++		pde->flags |= PROC_ENTRY_proc_read_iter;
++#ifdef CONFIG_COMPAT
++	if (pde->proc_ops->proc_compat_ioctl)
++		pde->flags |= PROC_ENTRY_proc_compat_ioctl;
++#endif
++	if (pde->proc_ops->proc_lseek)
++		pde->flags |= PROC_ENTRY_proc_lseek;
++}
++
+ /* returns the registered entry, or frees dp and returns NULL on failure */
+ struct proc_dir_entry *proc_register(struct proc_dir_entry *dir,
+ 		struct proc_dir_entry *dp)
+ {
++	if (S_ISREG(dp->mode) && dp->proc_ops)
++		pde_set_flags(dp);
++
+ 	if (proc_alloc_inum(&dp->low_ino))
+ 		goto out_free_entry;
+ 
+@@ -559,20 +576,6 @@ struct proc_dir_entry *proc_create_reg(const char *name, umode_t mode,
+ 	return p;
+ }
+ 
+-static void pde_set_flags(struct proc_dir_entry *pde)
+-{
+-	if (pde->proc_ops->proc_flags & PROC_ENTRY_PERMANENT)
+-		pde->flags |= PROC_ENTRY_PERMANENT;
+-	if (pde->proc_ops->proc_read_iter)
+-		pde->flags |= PROC_ENTRY_proc_read_iter;
+-#ifdef CONFIG_COMPAT
+-	if (pde->proc_ops->proc_compat_ioctl)
+-		pde->flags |= PROC_ENTRY_proc_compat_ioctl;
+-#endif
+-	if (pde->proc_ops->proc_lseek)
+-		pde->flags |= PROC_ENTRY_proc_lseek;
+-}
+-
+ struct proc_dir_entry *proc_create_data(const char *name, umode_t mode,
+ 		struct proc_dir_entry *parent,
+ 		const struct proc_ops *proc_ops, void *data)
+@@ -583,7 +586,6 @@ struct proc_dir_entry *proc_create_data(const char *name, umode_t mode,
+ 	if (!p)
+ 		return NULL;
+ 	p->proc_ops = proc_ops;
+-	pde_set_flags(p);
+ 	return proc_register(parent, p);
+ }
+ EXPORT_SYMBOL(proc_create_data);
+@@ -634,7 +636,6 @@ struct proc_dir_entry *proc_create_seq_private(const char *name, umode_t mode,
+ 	p->proc_ops = &proc_seq_ops;
+ 	p->seq_ops = ops;
+ 	p->state_size = state_size;
+-	pde_set_flags(p);
+ 	return proc_register(parent, p);
+ }
+ EXPORT_SYMBOL(proc_create_seq_private);
+@@ -665,7 +666,6 @@ struct proc_dir_entry *proc_create_single_data(const char *name, umode_t mode,
+ 		return NULL;
+ 	p->proc_ops = &proc_single_ops;
+ 	p->single_show = show;
+-	pde_set_flags(p);
+ 	return proc_register(parent, p);
+ }
+ EXPORT_SYMBOL(proc_create_single_data);
+-- 
+2.47.3
+

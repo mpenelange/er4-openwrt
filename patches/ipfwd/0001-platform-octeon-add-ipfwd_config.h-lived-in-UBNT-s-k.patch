@@ -1,0 +1,38 @@
+From 1621fdf6f69b6b491aeaeeb5ce0ba90d2fe2db8d Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 20:20:34 -0500
+Subject: [PATCH 01/18] platform/octeon: add ipfwd_config.h (lived in UBNT's kernel driver dir)
+
+The module includes ipfwd_config.h from its platform directory, but in the
+EdgeOS GPL archive the header sits in Ubiquiti's kernel tree next to the
+octeon-ethernet driver. Add it here (unchanged, with Cavium's header) so
+the module builds against other kernels.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ platform/octeon/include/ipfwd_config.h | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+ create mode 100644 platform/octeon/include/ipfwd_config.h
+
+diff --git a/platform/octeon/include/ipfwd_config.h b/platform/octeon/include/ipfwd_config.h
+new file mode 100644
+index 0000000..35542b7
+--- /dev/null
++++ b/platform/octeon/include/ipfwd_config.h
+@@ -0,0 +1,13 @@
++/*
++ * This file is subject to the terms and conditions of the GNU General Public
++ * License.  See the file "COPYING" in the main directory of this archive
++ * for more details.
++ *
++ * Copyright (C) 2013 Cavium, Inc.
++ */
++
++/* comment the line to disable output qos */
++#define IPFWD_OUTPUT_QOS	0
++
++/* number of queues per pko port */
++#define PKO_QUEUES_PER_PORT	8
+-- 
+2.47.3
+

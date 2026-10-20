@@ -1,0 +1,662 @@
+From 750da699e90a496d40b526979c145c907d9c59db Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 22:35:46 -0500
+Subject: [PATCH 03/10] netfilter, bridge, sched, macvlan: mark flows the offload engine must not cache
+
+Same as the UEK6 er4 branch, rebased onto UEK7 U3 (5.15): per-extension
+cvm_no_offload flags for xtables matches/targets and nftables
+expressions, xt_conntrack/nft_ct/nft_meta conditional marks, and the
+bridge/tc/macvlan marks. Compiles away without
+CONFIG_CAVIUM_NET_PACKET_FWD_OFFLOAD.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/net/macvlan.c              |  1 +
+ include/linux/netfilter/x_tables.h | 51 ++++++++++++++++++++++++++++++
+ include/net/netfilter/nf_tables.h  | 10 ++++++
+ net/bridge/br_input.c              |  3 ++
+ net/ipv4/netfilter/ip_tables.c     |  4 +++
+ net/ipv6/netfilter/ip6_tables.c    |  4 +++
+ net/netfilter/nf_tables_core.c     |  4 +++
+ net/netfilter/nft_connlimit.c      |  1 +
+ net/netfilter/nft_ct.c             |  5 +++
+ net/netfilter/nft_dynset.c         |  1 +
+ net/netfilter/nft_limit.c          |  1 +
+ net/netfilter/nft_log.c            |  1 +
+ net/netfilter/nft_meta.c           |  5 +++
+ net/netfilter/nft_numgen.c         |  1 +
+ net/netfilter/nft_queue.c          |  1 +
+ net/netfilter/nft_quota.c          |  1 +
+ net/netfilter/xt_LOG.c             |  2 ++
+ net/netfilter/xt_NFLOG.c           |  2 ++
+ net/netfilter/xt_connbytes.c       |  1 +
+ net/netfilter/xt_conntrack.c       |  4 +++
+ net/netfilter/xt_hashlimit.c       |  6 ++++
+ net/netfilter/xt_length.c          |  2 ++
+ net/netfilter/xt_limit.c           |  1 +
+ net/netfilter/xt_quota.c           |  1 +
+ net/netfilter/xt_rateest.c         |  1 +
+ net/netfilter/xt_recent.c          |  4 +++
+ net/netfilter/xt_statistic.c       |  1 +
+ net/netfilter/xt_string.c          |  1 +
+ net/netfilter/xt_time.c            |  1 +
+ net/netfilter/xt_u32.c             |  1 +
+ net/sched/act_api.c                |  3 ++
+ 31 files changed, 125 insertions(+)
+
+diff --git a/drivers/net/macvlan.c b/drivers/net/macvlan.c
+index 0aa55d563..d20fda44d 100644
+--- a/drivers/net/macvlan.c
++++ b/drivers/net/macvlan.c
+@@ -517,6 +517,7 @@ static rx_handler_result_t macvlan_handle_frame(struct sk_buff **pskb)
+ 	*pskb = skb;
+ 	skb->dev = dev;
+ 	skb->pkt_type = PACKET_HOST;
++	skb_cvm_reserve(skb, SKB_CVM_RESERVED_0);
+ 
+ 	ret = NET_RX_SUCCESS;
+ 	handle_res = RX_HANDLER_ANOTHER;
+diff --git a/include/linux/netfilter/x_tables.h b/include/linux/netfilter/x_tables.h
+index 55399a324..5b1de179f 100644
+--- a/include/linux/netfilter/x_tables.h
++++ b/include/linux/netfilter/x_tables.h
+@@ -40,6 +40,10 @@ struct xt_action_param {
+ 	unsigned int thoff;
+ 	u16 fragoff;
+ 	bool hotdrop;
++#ifdef CONFIG_CAVIUM_NET_PACKET_FWD_OFFLOAD
++	/* SKB_CVM_RESERVED_* bits collected during table traversal */
++	u16 cvm_reserved;
++#endif
+ };
+ 
+ static inline struct net *xt_net(const struct xt_action_param *par)
+@@ -146,6 +150,11 @@ struct xt_match {
+ 	const char name[XT_EXTENSION_MAXNAMELEN];
+ 	u_int8_t revision;
+ 
++#ifdef CONFIG_CAVIUM_NET_PACKET_FWD_OFFLOAD
++	/* Evaluating this extension needs every packet: don't offload the flow */
++	bool cvm_no_offload;
++#endif
++
+ 	/* Return true or false: return FALSE and set *hotdrop = 1 to
+            force immediate packet drop. */
+ 	/* Arguments changed since 2.6.9, as this must now handle
+@@ -186,6 +195,11 @@ struct xt_target {
+ 	const char name[XT_EXTENSION_MAXNAMELEN];
+ 	u_int8_t revision;
+ 
++#ifdef CONFIG_CAVIUM_NET_PACKET_FWD_OFFLOAD
++	/* Evaluating this extension needs every packet: don't offload the flow */
++	bool cvm_no_offload;
++#endif
++
+ 	/* Returns verdict. Argument order changed since 2.6.9, as this
+ 	   must now handle non-linear skbs, using skb_copy_bits and
+ 	   skb_ip_make_writable. */
+@@ -225,6 +239,43 @@ struct xt_target {
+ 	UEK_KABI_RESERVE(4)
+ };
+ 
++/* Cavium flow offload: extensions that must see every packet set
++ * XT_CVM_NO_OFFLOAD in their registration; the table walkers then mark
++ * the skb so the offload engine won't cache the flow.
++ */
++#ifdef CONFIG_CAVIUM_NET_PACKET_FWD_OFFLOAD
++#define XT_CVM_NO_OFFLOAD	.cvm_no_offload = true,
++static inline void xt_cvm_reserve(struct xt_action_param *par)
++{
++	par->cvm_reserved |= SKB_CVM_RESERVED_1;
++}
++static inline void xt_cvm_begin(struct xt_action_param *par)
++{
++	par->cvm_reserved = 0;
++}
++static inline void xt_cvm_note_match(struct xt_action_param *par)
++{
++	if (par->match->cvm_no_offload)
++		xt_cvm_reserve(par);
++}
++static inline void xt_cvm_note_target(struct xt_action_param *par)
++{
++	if (par->target->cvm_no_offload)
++		xt_cvm_reserve(par);
++}
++static inline void xt_cvm_commit(struct sk_buff *skb, const struct xt_action_param *par)
++{
++	skb_cvm_reserve(skb, par->cvm_reserved);
++}
++#else
++#define XT_CVM_NO_OFFLOAD
++static inline void xt_cvm_reserve(struct xt_action_param *par) { }
++static inline void xt_cvm_begin(struct xt_action_param *par) { }
++static inline void xt_cvm_note_match(struct xt_action_param *par) { }
++static inline void xt_cvm_note_target(struct xt_action_param *par) { }
++static inline void xt_cvm_commit(struct sk_buff *skb, const struct xt_action_param *par) { }
++#endif
++
+ /* Furniture shopping... */
+ struct xt_table {
+ 	struct list_head list;
+diff --git a/include/net/netfilter/nf_tables.h b/include/net/netfilter/nf_tables.h
+index 2b977d5d6..1469b0d50 100644
+--- a/include/net/netfilter/nf_tables.h
++++ b/include/net/netfilter/nf_tables.h
+@@ -843,6 +843,12 @@ struct nft_expr_ops;
+  *	@family: address family for AF-specific types
+  *	@flags: expression type flags
+  */
++#ifdef CONFIG_CAVIUM_NET_PACKET_FWD_OFFLOAD
++#define NFT_CVM_NO_OFFLOAD	.cvm_no_offload = true,
++#else
++#define NFT_CVM_NO_OFFLOAD
++#endif
++
+ struct nft_expr_type {
+ 	const struct nft_expr_ops	*(*select_ops)(const struct nft_ctx *,
+ 						       const struct nlattr * const tb[]);
+@@ -855,6 +861,10 @@ struct nft_expr_type {
+ 	unsigned int			maxattr;
+ 	u8				family;
+ 	u8				flags;
++#ifdef CONFIG_CAVIUM_NET_PACKET_FWD_OFFLOAD
++	/* evaluating this expression needs every packet: don't offload the flow */
++	bool				cvm_no_offload;
++#endif
+ };
+ 
+ #define NFT_EXPR_STATEFUL		0x1
+diff --git a/net/bridge/br_input.c b/net/bridge/br_input.c
+index 9d8d44e36..86d2a37fb 100644
+--- a/net/bridge/br_input.c
++++ b/net/bridge/br_input.c
+@@ -384,6 +384,9 @@ static rx_handler_result_t br_handle_frame(struct sk_buff **pskb)
+ 	if (unlikely(br_process_frame_type(p, skb)))
+ 		return RX_HANDLER_PASS;
+ 
++	/* bridged traffic stays in the slow path */
++	skb_cvm_reserve(skb, SKB_CVM_RESERVED_2);
++
+ forward:
+ 	switch (p->state) {
+ 	case BR_STATE_FORWARDING:
+diff --git a/net/ipv4/netfilter/ip_tables.c b/net/ipv4/netfilter/ip_tables.c
+index 15a9e303a..79c587da4 100644
+--- a/net/ipv4/netfilter/ip_tables.c
++++ b/net/ipv4/netfilter/ip_tables.c
+@@ -254,6 +254,7 @@ ipt_do_table(struct sk_buff *skb,
+ 	acpar.thoff   = ip_hdrlen(skb);
+ 	acpar.hotdrop = false;
+ 	acpar.state   = state;
++	xt_cvm_begin(&acpar);
+ 
+ 	WARN_ON(!(table->valid_hooks & (1 << hook)));
+ 	local_bh_disable();
+@@ -291,6 +292,7 @@ ipt_do_table(struct sk_buff *skb,
+ 		xt_ematch_foreach(ematch, e) {
+ 			acpar.match     = ematch->u.kernel.match;
+ 			acpar.matchinfo = ematch->data;
++			xt_cvm_note_match(&acpar);
+ 			if (!acpar.match->match(skb, &acpar))
+ 				goto no_match;
+ 		}
+@@ -343,6 +345,7 @@ ipt_do_table(struct sk_buff *skb,
+ 		acpar.target   = t->u.kernel.target;
+ 		acpar.targinfo = t->data;
+ 
++		xt_cvm_note_target(&acpar);
+ 		verdict = t->u.kernel.target->target(skb, &acpar);
+ 		if (verdict == XT_CONTINUE) {
+ 			/* Target might have changed stuff. */
+@@ -354,6 +357,7 @@ ipt_do_table(struct sk_buff *skb,
+ 		}
+ 	} while (!acpar.hotdrop);
+ 
++	xt_cvm_commit(skb, &acpar);
+ 	xt_write_recseq_end(addend);
+ 	local_bh_enable();
+ 
+diff --git a/net/ipv6/netfilter/ip6_tables.c b/net/ipv6/netfilter/ip6_tables.c
+index f2de34f0d..0a8bdd171 100644
+--- a/net/ipv6/netfilter/ip6_tables.c
++++ b/net/ipv6/netfilter/ip6_tables.c
+@@ -276,6 +276,7 @@ ip6t_do_table(struct sk_buff *skb,
+ 	acpar.fragoff = 0;
+ 	acpar.hotdrop = false;
+ 	acpar.state   = state;
++	xt_cvm_begin(&acpar);
+ 
+ 	WARN_ON(!(table->valid_hooks & (1 << hook)));
+ 
+@@ -315,6 +316,7 @@ ip6t_do_table(struct sk_buff *skb,
+ 		xt_ematch_foreach(ematch, e) {
+ 			acpar.match     = ematch->u.kernel.match;
+ 			acpar.matchinfo = ematch->data;
++			xt_cvm_note_match(&acpar);
+ 			if (!acpar.match->match(skb, &acpar))
+ 				goto no_match;
+ 		}
+@@ -365,6 +367,7 @@ ip6t_do_table(struct sk_buff *skb,
+ 		acpar.target   = t->u.kernel.target;
+ 		acpar.targinfo = t->data;
+ 
++		xt_cvm_note_target(&acpar);
+ 		verdict = t->u.kernel.target->target(skb, &acpar);
+ 		if (verdict == XT_CONTINUE)
+ 			e = ip6t_next_entry(e);
+@@ -373,6 +376,7 @@ ip6t_do_table(struct sk_buff *skb,
+ 			break;
+ 	} while (!acpar.hotdrop);
+ 
++	xt_cvm_commit(skb, &acpar);
+ 	xt_write_recseq_end(addend);
+ 	local_bh_enable();
+ 
+diff --git a/net/netfilter/nf_tables_core.c b/net/netfilter/nf_tables_core.c
+index 2ab4216d2..8d83a6d40 100644
+--- a/net/netfilter/nf_tables_core.c
++++ b/net/netfilter/nf_tables_core.c
+@@ -227,6 +227,10 @@ nft_do_chain(struct nft_pktinfo *pkt, void *priv)
+ 	for (; *rules ; rules++) {
+ 		rule = *rules;
+ 		nft_rule_for_each_expr(expr, last, rule) {
++#ifdef CONFIG_CAVIUM_NET_PACKET_FWD_OFFLOAD
++			if (expr->ops->type->cvm_no_offload)
++				skb_cvm_reserve(pkt->skb, SKB_CVM_RESERVED_1);
++#endif
+ 			if (expr->ops == &nft_cmp_fast_ops)
+ 				nft_cmp_fast_eval(expr, &regs);
+ 			else if (expr->ops == &nft_cmp16_fast_ops)
+diff --git a/net/netfilter/nft_connlimit.c b/net/netfilter/nft_connlimit.c
+index e2ddb5596..b81d94769 100644
+--- a/net/netfilter/nft_connlimit.c
++++ b/net/netfilter/nft_connlimit.c
+@@ -250,6 +250,7 @@ static const struct nft_expr_ops nft_connlimit_ops = {
+ 
+ static struct nft_expr_type nft_connlimit_type __read_mostly = {
+ 	.name		= "connlimit",
++	NFT_CVM_NO_OFFLOAD
+ 	.ops		= &nft_connlimit_ops,
+ 	.policy		= nft_connlimit_policy,
+ 	.maxattr	= NFTA_CONNLIMIT_MAX,
+diff --git a/net/netfilter/nft_ct.c b/net/netfilter/nft_ct.c
+index 4e723257f..af6a7fe8a 100644
+--- a/net/netfilter/nft_ct.c
++++ b/net/netfilter/nft_ct.c
+@@ -73,6 +73,11 @@ static void nft_ct_get_eval(const struct nft_expr *expr,
+ 
+ 	ct = nf_ct_get(pkt->skb, &ctinfo);
+ 
++#ifdef CONFIG_CAVIUM_NET_PACKET_FWD_OFFLOAD
++	if (priv->key == NFT_CT_BYTES || priv->key == NFT_CT_PKTS ||
++	    priv->key == NFT_CT_AVGPKT)
++		skb_cvm_reserve(pkt->skb, SKB_CVM_RESERVED_1);
++#endif
+ 	switch (priv->key) {
+ 	case NFT_CT_STATE:
+ 		if (ct)
+diff --git a/net/netfilter/nft_dynset.c b/net/netfilter/nft_dynset.c
+index 673c5e6a3..b5be4f6f9 100644
+--- a/net/netfilter/nft_dynset.c
++++ b/net/netfilter/nft_dynset.c
+@@ -433,6 +433,7 @@ static const struct nft_expr_ops nft_dynset_ops = {
+ 
+ struct nft_expr_type nft_dynset_type __read_mostly = {
+ 	.name		= "dynset",
++	NFT_CVM_NO_OFFLOAD
+ 	.ops		= &nft_dynset_ops,
+ 	.policy		= nft_dynset_policy,
+ 	.maxattr	= NFTA_DYNSET_MAX,
+diff --git a/net/netfilter/nft_limit.c b/net/netfilter/nft_limit.c
+index 9f69be201..0455c5446 100644
+--- a/net/netfilter/nft_limit.c
++++ b/net/netfilter/nft_limit.c
+@@ -317,6 +317,7 @@ nft_limit_select_ops(const struct nft_ctx *ctx,
+ 
+ static struct nft_expr_type nft_limit_type __read_mostly = {
+ 	.name		= "limit",
++	NFT_CVM_NO_OFFLOAD
+ 	.select_ops	= nft_limit_select_ops,
+ 	.policy		= nft_limit_policy,
+ 	.maxattr	= NFTA_LIMIT_MAX,
+diff --git a/net/netfilter/nft_log.c b/net/netfilter/nft_log.c
+index 48b3049d8..a6835911d 100644
+--- a/net/netfilter/nft_log.c
++++ b/net/netfilter/nft_log.c
+@@ -238,6 +238,7 @@ static const struct nft_expr_ops nft_log_ops = {
+ 
+ static struct nft_expr_type nft_log_type __read_mostly = {
+ 	.name		= "log",
++	NFT_CVM_NO_OFFLOAD
+ 	.ops		= &nft_log_ops,
+ 	.policy		= nft_log_policy,
+ 	.maxattr	= NFTA_LOG_MAX,
+diff --git a/net/netfilter/nft_meta.c b/net/netfilter/nft_meta.c
+index 35aba304a..0b9cb29a5 100644
+--- a/net/netfilter/nft_meta.c
++++ b/net/netfilter/nft_meta.c
+@@ -310,6 +310,11 @@ void nft_meta_get_eval(const struct nft_expr *expr,
+ 	const struct sk_buff *skb = pkt->skb;
+ 	u32 *dest = &regs->data[priv->dreg];
+ 
++#ifdef CONFIG_CAVIUM_NET_PACKET_FWD_OFFLOAD
++	if (priv->key == NFT_META_TIME_NS || priv->key == NFT_META_TIME_DAY ||
++	    priv->key == NFT_META_TIME_HOUR)
++		skb_cvm_reserve(pkt->skb, SKB_CVM_RESERVED_1);
++#endif
+ 	switch (priv->key) {
+ 	case NFT_META_LEN:
+ 		*dest = skb->len;
+diff --git a/net/netfilter/nft_numgen.c b/net/netfilter/nft_numgen.c
+index 4e43214e8..31426eec3 100644
+--- a/net/netfilter/nft_numgen.c
++++ b/net/netfilter/nft_numgen.c
+@@ -186,6 +186,7 @@ nft_ng_select_ops(const struct nft_ctx *ctx, const struct nlattr * const tb[])
+ 
+ static struct nft_expr_type nft_ng_type __read_mostly = {
+ 	.name		= "numgen",
++	NFT_CVM_NO_OFFLOAD
+ 	.select_ops	= nft_ng_select_ops,
+ 	.policy		= nft_ng_policy,
+ 	.maxattr	= NFTA_NG_MAX,
+diff --git a/net/netfilter/nft_queue.c b/net/netfilter/nft_queue.c
+index 9ba1de51a..d2e31d15c 100644
+--- a/net/netfilter/nft_queue.c
++++ b/net/netfilter/nft_queue.c
+@@ -194,6 +194,7 @@ nft_queue_select_ops(const struct nft_ctx *ctx,
+ 
+ static struct nft_expr_type nft_queue_type __read_mostly = {
+ 	.name		= "queue",
++	NFT_CVM_NO_OFFLOAD
+ 	.select_ops	= nft_queue_select_ops,
+ 	.policy		= nft_queue_policy,
+ 	.maxattr	= NFTA_QUEUE_MAX,
+diff --git a/net/netfilter/nft_quota.c b/net/netfilter/nft_quota.c
+index c2b5bcc7a..5d82b1253 100644
+--- a/net/netfilter/nft_quota.c
++++ b/net/netfilter/nft_quota.c
+@@ -268,6 +268,7 @@ static const struct nft_expr_ops nft_quota_ops = {
+ 
+ static struct nft_expr_type nft_quota_type __read_mostly = {
+ 	.name		= "quota",
++	NFT_CVM_NO_OFFLOAD
+ 	.ops		= &nft_quota_ops,
+ 	.policy		= nft_quota_policy,
+ 	.maxattr	= NFTA_QUOTA_MAX,
+diff --git a/net/netfilter/xt_LOG.c b/net/netfilter/xt_LOG.c
+index f39244f9c..bbfb229eb 100644
+--- a/net/netfilter/xt_LOG.c
++++ b/net/netfilter/xt_LOG.c
+@@ -77,6 +77,7 @@ static void log_tg_destroy(const struct xt_tgdtor_param *par)
+ static struct xt_target log_tg_regs[] __read_mostly = {
+ 	{
+ 		.name		= "LOG",
++		XT_CVM_NO_OFFLOAD
+ 		.family		= NFPROTO_IPV4,
+ 		.target		= log_tg,
+ 		.targetsize	= sizeof(struct xt_log_info),
+@@ -87,6 +88,7 @@ static struct xt_target log_tg_regs[] __read_mostly = {
+ #if IS_ENABLED(CONFIG_IP6_NF_IPTABLES)
+ 	{
+ 		.name		= "LOG",
++		XT_CVM_NO_OFFLOAD
+ 		.family		= NFPROTO_IPV6,
+ 		.target		= log_tg,
+ 		.targetsize	= sizeof(struct xt_log_info),
+diff --git a/net/netfilter/xt_NFLOG.c b/net/netfilter/xt_NFLOG.c
+index 6dcf4bc7e..477a69ad0 100644
+--- a/net/netfilter/xt_NFLOG.c
++++ b/net/netfilter/xt_NFLOG.c
+@@ -67,6 +67,7 @@ static void nflog_tg_destroy(const struct xt_tgdtor_param *par)
+ static struct xt_target nflog_tg_reg[] __read_mostly = {
+ 	{
+ 		.name       = "NFLOG",
++		XT_CVM_NO_OFFLOAD
+ 		.revision   = 0,
+ 		.family     = NFPROTO_IPV4,
+ 		.checkentry = nflog_tg_check,
+@@ -78,6 +79,7 @@ static struct xt_target nflog_tg_reg[] __read_mostly = {
+ #if IS_ENABLED(CONFIG_IP6_NF_IPTABLES)
+ 	{
+ 		.name       = "NFLOG",
++		XT_CVM_NO_OFFLOAD
+ 		.revision   = 0,
+ 		.family     = NFPROTO_IPV6,
+ 		.checkentry = nflog_tg_check,
+diff --git a/net/netfilter/xt_connbytes.c b/net/netfilter/xt_connbytes.c
+index 2aabdcea8..8a127db73 100644
+--- a/net/netfilter/xt_connbytes.c
++++ b/net/netfilter/xt_connbytes.c
+@@ -136,6 +136,7 @@ static void connbytes_mt_destroy(const struct xt_mtdtor_param *par)
+ 
+ static struct xt_match connbytes_mt_reg __read_mostly = {
+ 	.name       = "connbytes",
++	XT_CVM_NO_OFFLOAD
+ 	.revision   = 0,
+ 	.family     = NFPROTO_UNSPEC,
+ 	.checkentry = connbytes_mt_check,
+diff --git a/net/netfilter/xt_conntrack.c b/net/netfilter/xt_conntrack.c
+index ea299da24..a3e5091e7 100644
+--- a/net/netfilter/xt_conntrack.c
++++ b/net/netfilter/xt_conntrack.c
+@@ -167,6 +167,10 @@ conntrack_mt(const struct sk_buff *skb, struct xt_action_param *par,
+ 	const struct nf_conn *ct;
+ 	unsigned int statebit;
+ 
++	/* plain -m state is per-flow; other conntrack matches aren't (UBNT) */
++	if (!(info->match_flags & XT_CONNTRACK_STATE_ALIAS))
++		xt_cvm_reserve(par);
++
+ 	ct = nf_ct_get(skb, &ctinfo);
+ 
+ 	if (ct)
+diff --git a/net/netfilter/xt_hashlimit.c b/net/netfilter/xt_hashlimit.c
+index 26918fa57..0d95bdc20 100644
+--- a/net/netfilter/xt_hashlimit.c
++++ b/net/netfilter/xt_hashlimit.c
+@@ -994,6 +994,7 @@ static void hashlimit_mt_destroy(const struct xt_mtdtor_param *par)
+ static struct xt_match hashlimit_mt_reg[] __read_mostly = {
+ 	{
+ 		.name           = "hashlimit",
++		XT_CVM_NO_OFFLOAD
+ 		.revision       = 1,
+ 		.family         = NFPROTO_IPV4,
+ 		.match          = hashlimit_mt_v1,
+@@ -1005,6 +1006,7 @@ static struct xt_match hashlimit_mt_reg[] __read_mostly = {
+ 	},
+ 	{
+ 		.name           = "hashlimit",
++		XT_CVM_NO_OFFLOAD
+ 		.revision       = 2,
+ 		.family         = NFPROTO_IPV4,
+ 		.match          = hashlimit_mt_v2,
+@@ -1016,6 +1018,7 @@ static struct xt_match hashlimit_mt_reg[] __read_mostly = {
+ 	},
+ 	{
+ 		.name           = "hashlimit",
++		XT_CVM_NO_OFFLOAD
+ 		.revision       = 3,
+ 		.family         = NFPROTO_IPV4,
+ 		.match          = hashlimit_mt,
+@@ -1028,6 +1031,7 @@ static struct xt_match hashlimit_mt_reg[] __read_mostly = {
+ #if IS_ENABLED(CONFIG_IP6_NF_IPTABLES)
+ 	{
+ 		.name           = "hashlimit",
++		XT_CVM_NO_OFFLOAD
+ 		.revision       = 1,
+ 		.family         = NFPROTO_IPV6,
+ 		.match          = hashlimit_mt_v1,
+@@ -1039,6 +1043,7 @@ static struct xt_match hashlimit_mt_reg[] __read_mostly = {
+ 	},
+ 	{
+ 		.name           = "hashlimit",
++		XT_CVM_NO_OFFLOAD
+ 		.revision       = 2,
+ 		.family         = NFPROTO_IPV6,
+ 		.match          = hashlimit_mt_v2,
+@@ -1050,6 +1055,7 @@ static struct xt_match hashlimit_mt_reg[] __read_mostly = {
+ 	},
+ 	{
+ 		.name           = "hashlimit",
++		XT_CVM_NO_OFFLOAD
+ 		.revision       = 3,
+ 		.family         = NFPROTO_IPV6,
+ 		.match          = hashlimit_mt,
+diff --git a/net/netfilter/xt_length.c b/net/netfilter/xt_length.c
+index 1873da3a9..67d130096 100644
+--- a/net/netfilter/xt_length.c
++++ b/net/netfilter/xt_length.c
+@@ -39,6 +39,7 @@ length_mt6(const struct sk_buff *skb, struct xt_action_param *par)
+ static struct xt_match length_mt_reg[] __read_mostly = {
+ 	{
+ 		.name		= "length",
++		XT_CVM_NO_OFFLOAD
+ 		.family		= NFPROTO_IPV4,
+ 		.match		= length_mt,
+ 		.matchsize	= sizeof(struct xt_length_info),
+@@ -46,6 +47,7 @@ static struct xt_match length_mt_reg[] __read_mostly = {
+ 	},
+ 	{
+ 		.name		= "length",
++		XT_CVM_NO_OFFLOAD
+ 		.family		= NFPROTO_IPV6,
+ 		.match		= length_mt6,
+ 		.matchsize	= sizeof(struct xt_length_info),
+diff --git a/net/netfilter/xt_limit.c b/net/netfilter/xt_limit.c
+index 8b4fd2785..cdc7fdd66 100644
+--- a/net/netfilter/xt_limit.c
++++ b/net/netfilter/xt_limit.c
+@@ -186,6 +186,7 @@ static int limit_mt_compat_to_user(void __user *dst, const void *src)
+ 
+ static struct xt_match limit_mt_reg __read_mostly = {
+ 	.name             = "limit",
++	XT_CVM_NO_OFFLOAD
+ 	.revision         = 0,
+ 	.family           = NFPROTO_UNSPEC,
+ 	.match            = limit_mt,
+diff --git a/net/netfilter/xt_quota.c b/net/netfilter/xt_quota.c
+index 4452cc93b..99085d8f4 100644
+--- a/net/netfilter/xt_quota.c
++++ b/net/netfilter/xt_quota.c
+@@ -68,6 +68,7 @@ static void quota_mt_destroy(const struct xt_mtdtor_param *par)
+ 
+ static struct xt_match quota_mt_reg __read_mostly = {
+ 	.name       = "quota",
++	XT_CVM_NO_OFFLOAD
+ 	.revision   = 0,
+ 	.family     = NFPROTO_UNSPEC,
+ 	.match      = quota_mt,
+diff --git a/net/netfilter/xt_rateest.c b/net/netfilter/xt_rateest.c
+index 7c05b6342..859270f8f 100644
+--- a/net/netfilter/xt_rateest.c
++++ b/net/netfilter/xt_rateest.c
+@@ -129,6 +129,7 @@ static void xt_rateest_mt_destroy(const struct xt_mtdtor_param *par)
+ 
+ static struct xt_match xt_rateest_mt_reg __read_mostly = {
+ 	.name       = "rateest",
++	XT_CVM_NO_OFFLOAD
+ 	.revision   = 0,
+ 	.family     = NFPROTO_UNSPEC,
+ 	.match      = xt_rateest_mt,
+diff --git a/net/netfilter/xt_recent.c b/net/netfilter/xt_recent.c
+index 39937ff24..6ca464f22 100644
+--- a/net/netfilter/xt_recent.c
++++ b/net/netfilter/xt_recent.c
+@@ -694,6 +694,7 @@ static struct pernet_operations recent_net_ops = {
+ static struct xt_match recent_mt_reg[] __read_mostly = {
+ 	{
+ 		.name       = "recent",
++		XT_CVM_NO_OFFLOAD
+ 		.revision   = 0,
+ 		.family     = NFPROTO_IPV4,
+ 		.match      = recent_mt,
+@@ -704,6 +705,7 @@ static struct xt_match recent_mt_reg[] __read_mostly = {
+ 	},
+ 	{
+ 		.name       = "recent",
++		XT_CVM_NO_OFFLOAD
+ 		.revision   = 0,
+ 		.family     = NFPROTO_IPV6,
+ 		.match      = recent_mt,
+@@ -714,6 +716,7 @@ static struct xt_match recent_mt_reg[] __read_mostly = {
+ 	},
+ 	{
+ 		.name       = "recent",
++		XT_CVM_NO_OFFLOAD
+ 		.revision   = 1,
+ 		.family     = NFPROTO_IPV4,
+ 		.match      = recent_mt,
+@@ -724,6 +727,7 @@ static struct xt_match recent_mt_reg[] __read_mostly = {
+ 	},
+ 	{
+ 		.name       = "recent",
++		XT_CVM_NO_OFFLOAD
+ 		.revision   = 1,
+ 		.family     = NFPROTO_IPV6,
+ 		.match      = recent_mt,
+diff --git a/net/netfilter/xt_statistic.c b/net/netfilter/xt_statistic.c
+index 203e24ae4..618e4bb64 100644
+--- a/net/netfilter/xt_statistic.c
++++ b/net/netfilter/xt_statistic.c
+@@ -75,6 +75,7 @@ static void statistic_mt_destroy(const struct xt_mtdtor_param *par)
+ 
+ static struct xt_match xt_statistic_mt_reg __read_mostly = {
+ 	.name       = "statistic",
++	XT_CVM_NO_OFFLOAD
+ 	.revision   = 0,
+ 	.family     = NFPROTO_UNSPEC,
+ 	.match      = statistic_mt,
+diff --git a/net/netfilter/xt_string.c b/net/netfilter/xt_string.c
+index 8ce25bc9b..66d41d7cd 100644
+--- a/net/netfilter/xt_string.c
++++ b/net/netfilter/xt_string.c
+@@ -69,6 +69,7 @@ static void string_mt_destroy(const struct xt_mtdtor_param *par)
+ 
+ static struct xt_match xt_string_mt_reg __read_mostly = {
+ 	.name       = "string",
++	XT_CVM_NO_OFFLOAD
+ 	.revision   = 1,
+ 	.family     = NFPROTO_UNSPEC,
+ 	.checkentry = string_mt_check,
+diff --git a/net/netfilter/xt_time.c b/net/netfilter/xt_time.c
+index 61de85e02..d6176dcbb 100644
+--- a/net/netfilter/xt_time.c
++++ b/net/netfilter/xt_time.c
+@@ -265,6 +265,7 @@ static int time_mt_check(const struct xt_mtchk_param *par)
+ 
+ static struct xt_match xt_time_mt_reg __read_mostly = {
+ 	.name       = "time",
++	XT_CVM_NO_OFFLOAD
+ 	.family     = NFPROTO_UNSPEC,
+ 	.match      = time_mt,
+ 	.checkentry = time_mt_check,
+diff --git a/net/netfilter/xt_u32.c b/net/netfilter/xt_u32.c
+index ec1a21e3b..082bcdc77 100644
+--- a/net/netfilter/xt_u32.c
++++ b/net/netfilter/xt_u32.c
+@@ -128,6 +128,7 @@ static int u32_mt_checkentry(const struct xt_mtchk_param *par)
+ 
+ static struct xt_match xt_u32_mt_reg __read_mostly = {
+ 	.name       = "u32",
++	XT_CVM_NO_OFFLOAD
+ 	.revision   = 0,
+ 	.family     = NFPROTO_UNSPEC,
+ 	.match      = u32_mt,
+diff --git a/net/sched/act_api.c b/net/sched/act_api.c
+index 3b435e2f8..82b79c7e2 100644
+--- a/net/sched/act_api.c
++++ b/net/sched/act_api.c
+@@ -1075,6 +1075,9 @@ int tcf_action_exec(struct sk_buff *skb, struct tc_action **actions,
+ 	if (skb_skip_tc_classify(skb))
+ 		return TC_ACT_OK;
+ 
++	/* tc actions must see every packet */
++	skb_cvm_reserve(skb, SKB_CVM_RESERVED_3);
++
+ restart_act_graph:
+ 	for (i = 0; i < nr_actions; i++) {
+ 		const struct tc_action *a = actions[i];
+-- 
+2.47.3
+

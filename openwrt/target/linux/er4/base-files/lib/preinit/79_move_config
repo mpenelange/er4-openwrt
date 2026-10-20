@@ -1,0 +1,26 @@
+# Copyright (C) 2014 OpenWrt.org
+
+move_config() {
+	. /lib/upgrade/common.sh
+
+	local device="$1"
+	local fstype="$2"
+	[ -n "$device" ] && [ -b "$device" ] && {
+		mount -t "${fstype}" "$device" /mnt
+		[ -f "/mnt/$BACKUP_FILE" ] && mv -f "/mnt/$BACKUP_FILE" /
+		umount /mnt
+	}
+}
+
+
+er4_move_config() {
+	. /lib/functions.sh
+
+	case "$(board_name)" in
+		ubnt,edgerouter-4)
+			move_config "/dev/mmcblk0p1" "vfat"
+			;;
+	esac
+}
+
+boot_hook_add preinit_mount_root er4_move_config

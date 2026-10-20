@@ -1,0 +1,12 @@
+# U-Boot passes a device tree whose compatible is "cavium,ubnt_e300" (shared by ER-4/6P/12);
+# on UEK, /proc/cpuinfo says "Unsupported Board (CN7130...)" (no board tuple in the EEPROM),
+# so go by the device tree. This target is ER-4 only: name it the way upstream OpenWrt does.
+do_sysinfo_er4() {
+	grep -qs "cavium,ubnt_e300" /proc/device-tree/compatible || return 0
+
+	mkdir -p /tmp/sysinfo
+	echo "ubnt,edgerouter-4" > /tmp/sysinfo/board_name
+	echo "Ubiquiti EdgeRouter 4" > /tmp/sysinfo/model
+}
+
+boot_hook_add preinit_main do_sysinfo_er4

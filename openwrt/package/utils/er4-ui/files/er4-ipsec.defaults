@@ -1,0 +1,9 @@
+#!/bin/sh
+# strongSwan ships enabled, so charon would run (and listen on UDP 500/4500) with nothing set up.
+# Off until the VPN page saves the first IPsec remote (it enables and starts swanctl then).
+# Runs once per fresh /etc; a router with remotes keeps it on.
+[ -x /etc/init.d/swanctl ] || exit 0
+uci -q show ipsec | grep -q '=remote$' && exit 0
+/etc/init.d/swanctl stop 2>/dev/null
+/etc/init.d/swanctl disable
+exit 0

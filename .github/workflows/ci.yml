@@ -1,0 +1,27 @@
+name: checks
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Web UI type-check and build
+        run: cd ui && npm ci && npm run build
+      - name: Python syntax
+        run: python3 -m py_compile $(git ls-files '*.py')
+      - name: Shell syntax
+        run: |
+          for f in $(git ls-files '*.sh'); do bash -n "$f"; done
+          for f in $(git ls-files | xargs grep -l '^#!/bin/sh' 2>/dev/null); do sh -n "$f"; done
+      - name: References to tools/ scripts that don't exist
+        run: |
+          missing=$(git grep -hoE 'tools/[A-Za-z0-9_./-]+\.(sh|py|c)' | sort -u | while read -r f; do [ -e "$f" ] || echo "$f"; done)
+          [ -z "$missing" ] || { echo "missing: $missing"; exit 1; }

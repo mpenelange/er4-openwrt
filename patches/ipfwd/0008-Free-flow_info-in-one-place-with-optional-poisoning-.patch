@@ -1,0 +1,96 @@
+From f2c3509fec4bed07e4b023927ec2c87abadd63f9 Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Sat, 10 Oct 2026 10:11:54 -0500
+Subject: [PATCH 08/18] Free flow_info in one place, with optional poisoning for tests
+
+Route the three kfree(flow_info) sites through cvm_ipfwd_free_flow_info().
+Test builds (make IPFWD_POISON=1) overwrite the buffer with POISON_FREE
+before freeing it, so a fast-path reader that uses it after the free
+(the race fixed in the next patch) oopses on the poisoned dev pointer instead of silently
+reading stale data. No change without the flag.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Makefile |  5 +++++
+ ipfwd.c  | 21 ++++++++++++++++++---
+ 2 files changed, 23 insertions(+), 3 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 40fb854..129405a 100644
+--- a/Makefile
++++ b/Makefile
+@@ -100,6 +100,11 @@ ccflags-y += -DMAJOR_NUMBER=6 -DMINOR_NUMBER=1
+ # STATS
+ ccflags-y += -DIPFWD_ENABLE_STATS=1
+ 
++# Test builds only: poison flow_info buffers when freed (make IPFWD_POISON=1)
++ifeq ($(IPFWD_POISON),1)
++ccflags-y += -DIPFWD_DEBUG_POISON
++endif
++
+ EXTRA_OBJS += export.o
+ 
+ obj-m := cavium-ip-offload.o
+diff --git a/ipfwd.c b/ipfwd.c
+index 98770f1..712a239 100644
+--- a/ipfwd.c
++++ b/ipfwd.c
+@@ -40,6 +40,7 @@
+ #include <linux/proc_fs.h>
+ #include <linux/mii.h>
+ #include <linux/netdevice.h>
++#include <linux/poison.h>
+ #include <uapi/linux/if.h>
+ #include <net/ip.h>
+ 
+@@ -228,6 +229,20 @@ static int cvm_ipv6_ignore_cache_flush = 0;
+ /* Control counter for flushing the cache */
+ uint8_t cvm_gbl_ipfwd_cache_flush_stamp = 0;
+ 
++/*
++ * Free a flow_info buffer. Test builds (make IPFWD_POISON=1) overwrite it with
++ * POISON_FREE first, so a fast-path reader still using it after the free (the
++ * race in security audit F2) dereferences a garbage dev pointer and oopses
++ * instead of silently reading stale data.
++ */
++static inline void cvm_ipfwd_free_flow_info(void *flow_info)
++{
++#ifdef IPFWD_DEBUG_POISON
++	memset(flow_info, POISON_FREE, sizeof(cvm_ipfwd_flow_info_t));
++#endif
++	kfree(flow_info);
++}
++
+ static inline void cvm_ipfwd_flush_cache(cvm_ipfwd_flow_bucket_t* cache, int cache_size, int entries_per_bucket) {
+ 	int i, j;
+ 	cvm_ipfwd_flow_bucket_t *bucket;
+@@ -241,7 +256,7 @@ static inline void cvm_ipfwd_flush_cache(cvm_ipfwd_flow_bucket_t* cache, int cac
+ 
+ 			if(flow_entry->s.id0 && (flow_entry->s.id0 == flow_entry->s.id1)) {
+ 				if (flow_entry->s.flow_info) {
+-					kfree(phys_to_virt(flow_entry->s.flow_info << 2));
++					cvm_ipfwd_free_flow_info(phys_to_virt(flow_entry->s.flow_info << 2));
+ 				}
+ 			}
+ 
+@@ -743,7 +758,7 @@ static ssize_t ipv4_fwd_cache_write(struct file *file, const char __user *buffer
+ 					spin_lock(&bucket->hdr.wr_lock);
+ 
+ 					if (flow_entry->s.flow_info) {
+-						kfree(phys_to_virt(flow_entry->s.flow_info << 2));
++						cvm_ipfwd_free_flow_info(phys_to_virt(flow_entry->s.flow_info << 2));
+ 					}
+ 
+ 					flow_entry->u.word0 = 0;
+@@ -1547,7 +1562,7 @@ static void cvm_ipfwd_setup_entry(struct cvm_packet_info *cvm_info, cvm_ipfwd_fl
+ 
+ 	/* Free flow_info buf if one exists */
+ 	if (entry->s.flow_info) {
+-		kfree((void *)phys_to_virt(entry->s.flow_info << 2));
++		cvm_ipfwd_free_flow_info(phys_to_virt(entry->s.flow_info << 2));
+ 		entry->s.flow_info = 0;
+ 	}
+ 
+-- 
+2.47.3
+

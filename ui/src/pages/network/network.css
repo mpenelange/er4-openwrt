@@ -1,0 +1,79 @@
+/* Network page (and helpers shared with the Devices page, which imports this file).
+   Everything is scoped under the page roots so other pages' classes can't collide. */
+:is(.network-page, .devices-page) {
+  & .small { font-size: var(--fs-xs); }
+  & .nowrap { white-space: nowrap; flex-wrap: nowrap; }
+  & .gap3 { gap: var(--sp-3); }
+  & .spacer { flex: 1; }
+  & .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; flex: none; }
+
+  /* key/value grid in drawers */
+  & .kv { display: grid; grid-template-columns: 130px 1fr; gap: 6px var(--sp-3); align-items: center; }
+  & .kv > span:nth-child(odd) { color: var(--text-muted); font-size: var(--fs-sm); }
+  & .kv.small > span:nth-child(odd) { font-size: var(--fs-xs); }
+
+  & .section-h { display: flex; align-items: center; gap: var(--sp-2); margin: 0 0 var(--sp-2); padding-top: var(--sp-3); border-top: 1px solid var(--border); font-size: var(--fs-xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); }
+  & .section-h a { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 500; }
+
+  /* clickable option cards (instead of dropdowns) */
+  & .choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-2); }
+  & .choice-grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  & .choice { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: var(--sp-2) var(--sp-3); font: inherit; text-align: left; color: var(--text-primary); background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; }
+  & .choice:hover { border-color: var(--border-strong); background: var(--surface-2); }
+  & .choice.on { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+  & .choice-title { display: flex; align-items: center; gap: 6px; font-weight: 600; width: 100%; }
+  & .choice-title .muted { margin-left: auto; font-weight: 500; }
+  & .choice-desc { font-size: var(--fs-xs); color: var(--text-secondary); line-height: 1.4; }
+
+  /* chips: one-click choices */
+  & .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  & .chip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 var(--sp-2); font: inherit; font-size: var(--fs-sm); color: var(--text-primary); background: var(--surface-2); border: 1px solid var(--border); border-radius: 13px; cursor: pointer; white-space: nowrap; }
+  & .chip:hover { border-color: var(--border-strong); }
+  & .chip.on { background: var(--accent-soft); border-color: var(--accent); }
+  & .chip.add { border-style: dashed; background: transparent; color: var(--text-secondary); }
+  & .subchoice { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: var(--sp-2); }
+
+  & .check { display: flex; align-items: center; gap: var(--sp-2); margin-top: var(--sp-2); font-size: var(--fs-sm); }
+  & .note { display: flex; align-items: flex-start; gap: var(--sp-2); padding: var(--sp-2) var(--sp-3); margin-top: var(--sp-2); font-size: var(--fs-sm); color: var(--text-secondary); background: var(--surface-2); border-radius: var(--radius-sm); }
+  & .note svg { flex: none; margin-top: 1px; }
+  & .note.warn { color: var(--text-primary); background: color-mix(in srgb, var(--warning) 14%, transparent); }
+  & .note.warn svg { color: var(--warning); }
+  & .plan { margin: var(--sp-1) 0 0; padding-left: var(--sp-4); font-size: var(--fs-sm); line-height: 1.7; }
+}
+
+/* ---- network table ---- */
+.network-page .nettable td { vertical-align: middle; }
+.network-page .portcells { display: inline-flex; gap: 2px; }
+.network-page .pc { width: 18px; height: 18px; padding: 0; display: inline-flex; align-items: center; justify-content: center; font: inherit; font-size: var(--fs-xs); color: var(--text-muted); background: var(--surface-2); border: 1px solid var(--border); border-radius: 3px; cursor: pointer; }
+.network-page .pc span { line-height: 1; }
+.network-page .pc:hover { border-color: var(--border-strong); }
+.network-page .pc.u { background: var(--c); border-color: transparent; color: var(--accent-ink); font-weight: 650; }
+.network-page .pc.t { background: repeating-linear-gradient(135deg, var(--c) 0 2px, transparent 2px 4px); border-color: var(--c); color: var(--text-primary); font-weight: 650; }
+.network-page .pc.t span { background: var(--surface-1); border-radius: 2px; padding: 0 1px; }
+
+/* ---- wizard ---- */
+.network-page .stepper { display: flex; gap: 2px; margin: 0 0 var(--sp-4); padding: 0; list-style: none; }
+.network-page .stepper li { flex: 1; }
+.network-page .stepper button { display: flex; align-items: center; gap: 6px; width: 100%; height: 30px; padding: 0 var(--sp-2); font: inherit; font-size: var(--fs-sm); color: var(--text-muted); background: var(--surface-2); border: 0; border-bottom: 2px solid var(--border); cursor: pointer; }
+.network-page .stepper button:disabled { cursor: default; }
+.network-page .stepper .n { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; font-size: var(--fs-xs); font-weight: 650; background: var(--surface-3); color: var(--text-secondary); }
+.network-page .stepper li.on button { color: var(--text-primary); font-weight: 600; border-bottom-color: var(--accent); }
+.network-page .stepper li.on .n { background: var(--accent); color: var(--accent-ink); }
+.network-page .stepper li.done button { color: var(--text-secondary); border-bottom-color: var(--accent-soft); }
+.network-page .stepper li.done .n { background: var(--accent-soft); color: var(--text-primary); }
+.network-page .fw-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-2); }
+.network-page .fw-toggle { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-2) var(--sp-3); border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-1); cursor: pointer; }
+.network-page .fw-toggle.on { border-color: var(--accent); background: var(--accent-soft); }
+.iface-ctl { flex-wrap: wrap; gap: 6px; }
+.dhcp-opts { flex: 1; min-width: 0; }
+
+/* ports <-> networks map (map.tsx; base look from the firewall zone map) */
+.net-map .edge .line { stroke-width: 2.5; }
+.net-map .edge.tagged .line { stroke-dasharray: 5 4; stroke-width: 2; }
+.net-map .edge.hot .line { stroke: var(--critical); }
+.net-map .edge.tagged.hot .line { stroke: var(--accent); }
+.net-map .vlan-t { font-size: 10px; font-weight: 600; fill: var(--text-secondary); font-family: var(--mono); pointer-events: none; }
+.net-map .port-node.nolink .name { fill: var(--text-secondary); }
+.net-map .link-dot { fill: var(--text-muted); }
+.net-map .link-dot.up { fill: var(--good); }
+.net-map .zone-node:not(.port-node) { cursor: pointer; }

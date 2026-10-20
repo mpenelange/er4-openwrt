@@ -1,0 +1,316 @@
+From 77fa36d146dd24885d368f53c76533b7a90e0f77 Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 22:34:37 -0500
+Subject: [PATCH 01/10] net: add Cavium Octeon flow-offload hooks (ported from UBNT 4.9.79)
+
+Same change as on the UEK6 er4 branch (sk_buff cvm_info/cvm_reserved,
+skb_cvm_reserve(), dev.c rx/tx hooks, net_device->is_cvm_dev, Kconfig),
+rebased onto UEK7 U3 (5.15). UEK7's SDK import already references
+CONFIG_CAVIUM_NET_PACKET_FWD_OFFLOAD and skb->cvm_info (skbuff.c,
+octeon-ethernet), but never defined them; this provides them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/net/Kconfig       |  24 +++++++
+ include/linux/netdevice.h |   8 +++
+ include/linux/skbuff.h    | 147 ++++++++++++++++++++++++++++++++++++++
+ net/core/dev.c            |  31 ++++++++
+ 4 files changed, 210 insertions(+)
+
+diff --git a/drivers/net/Kconfig b/drivers/net/Kconfig
+index 44a7d3644..bd25b540d 100644
+--- a/drivers/net/Kconfig
++++ b/drivers/net/Kconfig
+@@ -612,4 +612,28 @@ config NETDEV_LEGACY_INIT
+ 	  Drivers that call netdev_boot_setup_check() should select this
+ 	  symbol, everything else no longer needs it.
+ 
++config CAVIUM_NET_PACKET_FWD_OFFLOAD
++	bool "Enable Cavium Octeon packet forwarding offload support"
++	default "n"
++	help
++	  This is required for Cavium Octeon ipfwd-offload/bridge offload modules.
++	  ipfwd offload and bridge offload modules use packet
++	  sending functionality exposed by this config.
++
++config CAVIUM_IPFWD_OFFLOAD
++	bool "Enable Cavium Octeon ip-offload module"
++	default "n"
++	depends on CAVIUM_NET_PACKET_FWD_OFFLOAD
++	help
++	  This enables packet callbacks for Cavium Octeon ipfwd-offload module.
++	  ipfwd-offload module can offload packet switching for
++	  tcp/udp/vlan/pppoe/gre packets over IPv4 and IPv6.
++
++config CAVIUM_BRIDGE_OFFLOAD
++	bool "Enable Cavium Octeon bridge module"
++	default "n"
++	depends on CAVIUM_NET_PACKET_FWD_OFFLOAD
++	help
++	  This enables Cavium Octeon bridge module.
++
+ endif # NETDEVICES
+diff --git a/include/linux/netdevice.h b/include/linux/netdevice.h
+index 871dd493d..c9c245d21 100644
+--- a/include/linux/netdevice.h
++++ b/include/linux/netdevice.h
+@@ -2187,6 +2187,9 @@ struct net_device {
+ 	/* Interface address info. */
+ 	unsigned char		perm_addr[MAX_ADDR_LEN];
+ 	unsigned char		addr_assign_type;
++#ifdef CONFIG_CAVIUM_IPFWD_OFFLOAD
++	u8			is_cvm_dev;	/* Octeon port the offload engine may use */
++#endif
+ 	unsigned char		addr_len;
+ 	unsigned char		upper_level;
+ 	unsigned char		lower_level;
+@@ -5319,4 +5322,9 @@ extern struct net_device *blackhole_netdev;
+ 		atomic_long_add((VAL), &(DEV)->stats.__##FIELD)
+ #define DEV_STATS_READ(DEV, FIELD) atomic_long_read(&(DEV)->stats.__##FIELD)
+ 
++#ifdef CONFIG_CAVIUM_IPFWD_OFFLOAD
++extern u32 (*cvm_ipfwd_rx_hook)(struct sk_buff *);
++extern int (*cvm_ipfwd_tx_hook)(struct sk_buff *);
++#endif
++
+ #endif	/* _LINUX_NETDEVICE_H */
+diff --git a/include/linux/skbuff.h b/include/linux/skbuff.h
+index acd2bf1cd..3cf155c8c 100644
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -815,6 +815,141 @@ typedef unsigned char *sk_buff_data_t;
+  *	@extensions: allocated extensions, valid if active_extensions is nonzero
+  */
+ 
++#ifdef CONFIG_CAVIUM_NET_PACKET_FWD_OFFLOAD
++
++struct iphdr_new {
++#if defined(__LITTLE_ENDIAN_BITFIELD)
++	__u8    ihl:4,
++			version:4;
++#elif defined(__BIG_ENDIAN_BITFIELD)
++	__u8    version:4,
++			ihl:4;
++#else
++#error  "Please fix <asm/byteorder.h>"
++#endif
++	__u8    tos;
++	__be16  tot_len;
++	__be16  id;
++	__be16  frag_off;
++	__u8    ttl;
++	__u8    protocol;
++	__sum16 check;
++	__be32  saddr;
++	__be32  daddr;
++	/*The options start here. */
++};
++
++struct ipv6hdr_new {
++#if defined(__LITTLE_ENDIAN_BITFIELD)
++	__u8		priority:4,
++				version:4;
++#elif defined(__BIG_ENDIAN_BITFIELD)
++	__u8		version:4,
++				priority:4;
++#else
++#error	"Please fix <asm/byteorder.h>"
++#endif
++	__u8			flow_lbl[3];
++
++	__be16			payload_len;
++	__u8			nexthdr;
++	__u8			hop_limit;
++
++	uint64_t                saddrhi;
++	uint64_t                saddrlo;
++	uint64_t                daddrhi;
++	uint64_t                daddrlo;
++};
++
++struct cvm_udphdr {
++	__be16	source;
++	__be16	dest;
++	__be16	len;
++	__sum16	check;
++};
++
++struct cvm_pppoe_hdr {
++#if defined(__LITTLE_ENDIAN_BITFIELD)
++	__u8 ver : 4;
++	__u8 type : 4;
++#elif defined(__BIG_ENDIAN_BITFIELD)
++	__u8 type : 4;
++	__u8 ver : 4;
++#else
++#error  "Please fix <asm/byteorder.h>"
++#endif
++	__u8 code;
++	__be16 sid;
++	__be16 length;
++};
++
++struct cvm_vlan_hdr {
++	__be16 h_vlan_TCI;
++	__be16 h_vlan_encapsulated_proto;
++};
++
++struct cvm_vxlan_hdr {
++	__be32 vx_flags;
++	__be32 vx_vni;
++};
++
++struct gre_hdr_info {
++	__be16 flags;
++	__be16 protocol;
++	__be32 key;
++	__be32 headroom;
++};
++
++
++struct cvm_packet_info {
++	unsigned long		rx_pkt_flags;
++	unsigned long		tx_pkt_flags;
++	u32			cookie;		/* magic number */
++	void			*bucket;	/* bucket ptr */
++	void			*frag_bucket;	/* Frag bucket ptr */
++	u32			seq;	/* TCP seq number (if present) */
++	u32			ack_seq; /* TCP ack number (if present) */
++	int			qos_level;
++	struct cvm_vlan_hdr	vlan;
++	struct cvm_vxlan_hdr	vxlan;
++	struct cvm_pppoe_hdr	pppoe;
++	struct gre_hdr_info	gre;
++	union {
++		struct iphdr_new	outer_ip4;	/* IP header */
++		struct ipv6hdr_new	outer_ip6;
++	};
++	struct cvm_udphdr	outer_udp;
++	union {
++		struct {
++			u32			old_reserved1;
++			struct iphdr_new	cvm_ip;	/* IP header */
++			u64			reserved2[2];
++		} cvm_ip4;
++		struct ipv6hdr_new  cvm_ip6;
++	} cvm_ip4_ip6_u;
++	u64	reserved2[2];	/* L4 ports and reserved */
++#define cvmip                            cvm_ip4_ip6_u.cvm_ip4.cvm_ip
++#define cvmip6                           cvm_ip4_ip6_u.cvm_ip6
++};
++
++#endif /* CONFIG_CAVIUM_NET_PACKET_FWD_OFFLOAD */
++
++/* Defined unconditionally so callers of skb_cvm_reserve() need no #ifdefs. */
++/* Bits in skb->cvm_reserved. Any bit set means "the offload engine must not
++ * cache this flow" because something in the slow path has to see every packet.
++ */
++enum {
++	SKB_CVM_RESERVED_0 = (1 << 0),	/* macvlan */
++	SKB_CVM_RESERVED_1 = (1 << 1),	/* per-packet netfilter match/target */
++	SKB_CVM_RESERVED_2 = (1 << 2),	/* bridged */
++	SKB_CVM_RESERVED_3 = (1 << 3),	/* tc action */
++	SKB_CVM_RESERVED_4 = (1 << 4),	/* non-default qdisc */
++	SKB_CVM_RESERVED_15 = (1 << 15),
++};
++
++#define SKB_DPI_SHIFT 15
++#define SKB_CVM_RESERVED_MASK ((1 << SKB_DPI_SHIFT) - 1)
++
+ struct sk_buff {
+ 	union {
+ 		struct {
+@@ -1020,6 +1155,10 @@ struct sk_buff {
+ #ifdef CONFIG_KCOV
+ 	u64			kcov_handle;
+ #endif
++#ifdef CONFIG_CAVIUM_NET_PACKET_FWD_OFFLOAD
++	struct cvm_packet_info	cvm_info;
++	__u16			cvm_reserved;
++#endif
+ 
+ 	/* private: */
+ 	__u32			headers_end[0];
+@@ -1052,6 +1191,14 @@ struct sk_buff {
+  * skb_pfmemalloc - Test if the skb was allocated from PFMEMALLOC reserves
+  * @skb: buffer
+  */
++/* Mark a packet's flow as not offloadable (see SKB_CVM_RESERVED_*). */
++static inline void skb_cvm_reserve(struct sk_buff *skb, u16 bits)
++{
++#ifdef CONFIG_CAVIUM_NET_PACKET_FWD_OFFLOAD
++	skb->cvm_reserved |= bits;
++#endif
++}
++
+ static inline bool skb_pfmemalloc(const struct sk_buff *skb)
+ {
+ 	return unlikely(skb->pfmemalloc);
+diff --git a/net/core/dev.c b/net/core/dev.c
+index a526a6dd3..aa6f124de 100644
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -190,6 +190,17 @@ static struct napi_struct *napi_by_id(unsigned int napi_id);
+ DEFINE_RWLOCK(dev_base_lock);
+ EXPORT_SYMBOL(dev_base_lock);
+ 
++#ifdef CONFIG_CAVIUM_IPFWD_OFFLOAD
++/* Set by the Cavium ipfwd offload module. The rx hook returns 0 when it has
++ * consumed (fast-path forwarded) the packet; the tx hook learns egress flows.
++ */
++u32 (*cvm_ipfwd_rx_hook)(struct sk_buff *);
++EXPORT_SYMBOL(cvm_ipfwd_rx_hook);
++
++int (*cvm_ipfwd_tx_hook)(struct sk_buff *);
++EXPORT_SYMBOL(cvm_ipfwd_tx_hook);
++#endif
++
+ static DEFINE_MUTEX(ifalias_mutex);
+ 
+ /* protects napi_hash addition/deletion and napi_gen_id */
+@@ -4252,8 +4263,20 @@ static int __dev_queue_xmit(struct sk_buff *skb, struct net_device *sb_dev)
+ 	txq = netdev_core_pick_tx(dev, skb, sb_dev);
+ 	q = rcu_dereference_bh(txq->qdisc);
+ 
++#ifdef CONFIG_CAVIUM_IPFWD_OFFLOAD
++	if (cvm_ipfwd_tx_hook && (!q->enqueue || q->ops == &pfifo_fast_ops)) {
++		if (cvm_ipfwd_tx_hook(skb) == -ENOMEM) {
++			rc = -ENOMEM;
++			goto drop;
++		}
++	}
++#endif
++
+ 	trace_net_dev_queue(skb);
+ 	if (q->enqueue) {
++		/* Shaped/scheduled traffic must stay in the slow path */
++		if (q->ops != &pfifo_fast_ops)
++			skb_cvm_reserve(skb, SKB_CVM_RESERVED_4);
+ 		rc = __dev_xmit_skb(skb, q, dev, txq);
+ 		goto out;
+ 	}
+@@ -4323,6 +4346,9 @@ static int __dev_queue_xmit(struct sk_buff *skb, struct net_device *sb_dev)
+ 		}
+ 	}
+ 
++#ifdef CONFIG_CAVIUM_IPFWD_OFFLOAD
++drop:
++#endif
+ 	rcu_read_unlock_bh();
+ 
+ 	dev_core_stats_tx_dropped_inc(dev);
+@@ -5378,6 +5404,11 @@ static int __netif_receive_skb_core(struct sk_buff **pskb, bool pfmemalloc,
+ 	int ret = NET_RX_DROP;
+ 	__be16 type;
+ 
++#ifdef CONFIG_CAVIUM_IPFWD_OFFLOAD
++	if (cvm_ipfwd_rx_hook && !cvm_ipfwd_rx_hook(skb))
++		return NET_RX_SUCCESS;
++#endif
++
+ 	net_timestamp_check(!READ_ONCE(netdev_tstamp_prequeue), skb);
+ 
+ 	trace_netif_receive_skb(skb);
+-- 
+2.47.3
+

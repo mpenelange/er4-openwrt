@@ -1,0 +1,558 @@
+From 6f00f01e0419a772bd5d6e548aab88984cfd1801 Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Sat, 10 Oct 2026 14:37:00 -0500
+Subject: [PATCH 09/18] Fix use-after-free and torn reads between the fast path and flow learning
+
+The rx fast path reads flow entries and their flow_info without the
+bucket lock, while the learn path (another core) replaced entries and
+kfree()d or memset() the flow_info in use. The entry
+id0/id1 check didn't help: the reader only checked it before comparing
+the key, then re-read flow_info later, and writers set flow_info outside
+the id window with no memory barriers (Octeon is weakly ordered). A
+reader could use freed memory, or match flow A and forward with flow B's
+rewrite data.
+
+- flow_info is freed with kfree_rcu (call_rcu + poison in IPFWD_POISON
+  test builds); the rx hooks (pkt_receive, pkt_receive_cb) and the /proc
+  cache dumps are RCU read-side sections
+- the learn path never rewrites a published flow_info: it builds a new
+  one, publishes it, and RCU-frees the old one
+- id0/id1 is now a real sequence count: writers set id0, smp_wmb, change
+  the entry (key and flow_info), smp_wmb, set id1; readers copy the entry
+  between reading id1 and id0 and use only that consistent copy
+- the /proc flush and resize handlers wait for a grace period
+  (synchronize_net) instead of a fixed 20 us before freeing
+- the /proc per-entry clear takes the bucket lock irqsave like the learn
+  path (plain spin_lock could deadlock against the tx hook)
+
+Tested on the ER-4 with a flow-churn stress test (8-bucket cache, 4x200 Mbit/s
+UDP each way, 500 s of ~500k pps flow churn, then 50 pps churn). Poison
+build without this fix: traffic died within seconds of the first phase
+and the router stopped receiving on all ports (reboot needed). Poison
+build with the fix: same load, 800/800 Mbit/s before and after the
+flood, 0 kernel warnings, router reachable. Fast-path hits unchanged
+(451k/s vs 450k/s).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ipfwd.c        | 249 +++++++++++++++++++++++++++++++++----------------
+ ipfwd_common.h |   1 +
+ 2 files changed, 168 insertions(+), 82 deletions(-)
+
+diff --git a/ipfwd.c b/ipfwd.c
+index 712a239..2892f0f 100644
+--- a/ipfwd.c
++++ b/ipfwd.c
+@@ -230,17 +230,80 @@ static int cvm_ipv6_ignore_cache_flush = 0;
+ uint8_t cvm_gbl_ipfwd_cache_flush_stamp = 0;
+ 
+ /*
+- * Free a flow_info buffer. Test builds (make IPFWD_POISON=1) overwrite it with
+- * POISON_FREE first, so a fast-path reader still using it after the free (the
+- * race in security audit F2) dereferences a garbage dev pointer and oopses
+- * instead of silently reading stale data.
++ * Free a flow_info buffer. The rx fast path uses flow_info without taking the
++ * bucket lock, so it may still be reading a buffer that the learn path just
++ * replaced on another core (security audit F2): free only after an RCU grace
++ * period. The rx hook runs in NAPI softirq, an RCU read-side section.
++ *
++ * Test builds (make IPFWD_POISON=1) overwrite the buffer with POISON_FREE
++ * when it is finally freed, so any use after the grace period shows up.
+  */
+-static inline void cvm_ipfwd_free_flow_info(void *flow_info)
++#ifdef IPFWD_DEBUG_POISON
++static void cvm_ipfwd_free_flow_info_rcu(struct rcu_head *head)
++{
++	cvm_ipfwd_flow_info_t *flow_info = container_of(head, cvm_ipfwd_flow_info_t, rcu);
++
++	memset(flow_info, POISON_FREE, sizeof(*flow_info));
++	kfree(flow_info);
++}
++#endif
++
++static inline void cvm_ipfwd_free_flow_info(void *ptr)
+ {
++	cvm_ipfwd_flow_info_t *flow_info = ptr;
++
+ #ifdef IPFWD_DEBUG_POISON
+-	memset(flow_info, POISON_FREE, sizeof(cvm_ipfwd_flow_info_t));
++	call_rcu(&flow_info->rcu, cvm_ipfwd_free_flow_info_rcu);
++#else
++	kfree_rcu(flow_info, rcu);
+ #endif
+-	kfree(flow_info);
++}
++
++/*
++ * Flow entries are read locklessly by the rx fast path and written under the
++ * bucket lock. id0/id1 form a sequence count: a writer sets id0 to a new
++ * value, changes the entry, then sets id1 = id0; a reader copies the entry
++ * between reading id1 and id0 and only trusts the copy if they match. Every
++ * change a reader must see consistently (the key and flow_info) goes through
++ * cvm_ipfwd_entry_write_begin()/_end(). Ids are 4 bits and never 0 once
++ * written, so a never-used (all-zero) entry is never mistaken for a write in
++ * progress.
++ */
++static inline void cvm_ipfwd_entry_write_begin(cvm_ipfwd_flow_entry_t *entry)
++{
++	u8 id = (entry->s.id1 + 1) & 0xf;
++
++	entry->s.id0 = id ? id : 1;
++	smp_wmb();
++}
++
++static inline void cvm_ipfwd_entry_write_end(cvm_ipfwd_flow_entry_t *entry)
++{
++	smp_wmb();
++	entry->s.id1 = entry->s.id0;
++}
++
++static __always_inline void cvm_ipfwd_entry_ids(const cvm_ipfwd_flow_entry_t *entry, u8 *id0, u8 *id1)
++{
++	cvm_ipfwd_flow_entry_t t;
++
++	t.u.word5 = READ_ONCE(entry->u.word5);
++	*id0 = t.s.id0;
++	*id1 = t.s.id1;
++}
++
++/* Clear everything but the ids (inside a write section) */
++static inline void cvm_ipfwd_entry_clear(cvm_ipfwd_flow_entry_t *entry)
++{
++	entry->u.word0 = 0;
++	entry->u.word1 = 0;
++	entry->u.word2 = 0;
++	entry->u.word3 = 0;
++	entry->u.word4 = 0;
++	entry->s.cache_flush_stamp = 0;
++	entry->s.l4_dport = 0;
++	entry->s.gre_key = 0;
++	entry->u.word6 = 0;
+ }
+ 
+ static inline void cvm_ipfwd_flush_cache(cvm_ipfwd_flow_bucket_t* cache, int cache_size, int entries_per_bucket) {
+@@ -300,6 +363,7 @@ static int cvm_ipv6_fwd_cache_show(struct seq_file *file, void *ptr)
+         return 0;
+     }
+ 
++    rcu_read_lock();	/* flow_info may be freed concurrently (after a grace period) */
+     for (bb = 0; bb < ipv6_cache_size; bb++)
+     {
+         bucket = &cvm_gbl_ipv6_fwd_cache[bb];
+@@ -375,6 +439,7 @@ static int cvm_ipv6_fwd_cache_show(struct seq_file *file, void *ptr)
+             }
+         }
+     }
++    rcu_read_unlock();
+ 
+     seq_printf(file, "------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|\n");
+     seq_printf(file, "\n");
+@@ -417,7 +482,7 @@ static ssize_t ipv6_fwd_cache_write(struct file *file, const char __user *buffer
+ 		cvm_ipv6_fwd = false;
+ 		clear_ipv6_bit(ipfwd_flags);
+ 		CVMX_SYNC;
+-		cvmx_wait(20000);
++		synchronize_net();	/* let fast-path readers finish before freeing */
+ 		pr_info("\nFlushing IPv6 cache\n");
+ 		cvm_ipfwd_flush_cache(cvm_gbl_ipv6_fwd_cache, ipv6_cache_size, CVM_IPFWD_ENTRIES_PER_BUCKET);
+ 		cvm_ipv6_fwd = true;
+@@ -610,7 +675,7 @@ static ssize_t ipv4_fwd_cache_size_write(struct file *file, const char __user *i
+ 	cvm_ipv4_fwd = false;
+ 	clear_ipv4_bit(ipfwd_flags);
+ 	CVMX_SYNC;
+-	cvmx_wait(20000);
++	synchronize_net();	/* let fast-path readers finish before freeing */
+ 
+ 	/* Flush and free the cache. */
+ 	pr_info("Flushing IPv4 cache (size changed)\n");
+@@ -647,7 +712,9 @@ static int ipv4_fwd_cache_show(struct seq_file *file, void *ptr)
+ 		return 0;
+ 	}
+ 
++	rcu_read_lock();	/* flow_info may be freed concurrently (after a grace period) */
+ 	print_flow_entry(file);
++	rcu_read_unlock();
+ 
+ 	seq_printf(file, "\n");
+ #endif
+@@ -669,6 +736,7 @@ static ssize_t ipv4_fwd_cache_write(struct file *file, const char __user *buffer
+ 	u8 dst_ip0, dst_ip1, dst_ip2, dst_ip3;
+ 	u16 src_port, dst_port;
+ 	u16 n_tokens;
++	unsigned long flags;
+ 
+ 	if(!cvm_ipv4_fwd) {
+ 		printk(KERN_ERR"Ipv4 Ipfwd offload disabled.Please enable it and try again!!!\n");
+@@ -705,7 +773,7 @@ static ssize_t ipv4_fwd_cache_write(struct file *file, const char __user *buffer
+ 			cvm_ipv4_fwd = false;
+ 			clear_ipv4_bit(ipfwd_flags);
+ 			CVMX_SYNC;
+-			cvmx_wait(20000);
++			synchronize_net();	/* let fast-path readers finish before freeing */
+ 			pr_info("\nFlushing IPv4 cache\n");
+ 			cvm_ipfwd_flush_cache(cvm_gbl_ipv4_fwd_cache, ipv4_cache_size, CVM_IPFWD_ENTRIES_PER_BUCKET);
+ 			cvm_ipv4_fwd = true;
+@@ -755,21 +823,17 @@ static ssize_t ipv4_fwd_cache_write(struct file *file, const char __user *buffer
+ 						continue;
+ 					}
+ 
+-					spin_lock(&bucket->hdr.wr_lock);
++					/* irqsave: the learn path takes this lock from the tx hook */
++					spin_lock_irqsave(&bucket->hdr.wr_lock, flags);
+ 
++					cvm_ipfwd_entry_write_begin(flow_entry);
+ 					if (flow_entry->s.flow_info) {
+ 						cvm_ipfwd_free_flow_info(phys_to_virt(flow_entry->s.flow_info << 2));
+ 					}
++					cvm_ipfwd_entry_clear(flow_entry);
++					cvm_ipfwd_entry_write_end(flow_entry);
+ 
+-					flow_entry->u.word0 = 0;
+-					flow_entry->u.word1 = 0;
+-					flow_entry->u.word2 = 0;
+-					flow_entry->u.word3 = 0;
+-					flow_entry->u.word4 = 0;
+-					flow_entry->u.word5 = 0;
+-					flow_entry->u.word6 = 0;
+-
+-					spin_unlock(&bucket->hdr.wr_lock);
++					spin_unlock_irqrestore(&bucket->hdr.wr_lock, flags);
+ 				}
+ 
+ 			}
+@@ -880,7 +944,7 @@ static ssize_t ipv6_fwd_cache_size_write(struct file *file, const char __user *i
+ 	cvm_ipv6_fwd = false;
+ 	clear_ipv6_bit(ipfwd_flags);
+ 	CVMX_SYNC;
+-	cvmx_wait(20000);
++	synchronize_net();	/* let fast-path readers finish before freeing */
+ 
+ 	/* Flush and free the cache. */
+ 	pr_info("Flushing IPv6 cache (size changed)\n");
+@@ -1009,8 +1073,10 @@ static inline int cvm_ipfwd_find_entry(cvm_ipfwd_flow_bucket_t *bucket,
+ 					void* ip,
+ 					cvm_ipfwd_flow_entry_t **out_entry,
+ 					struct cvm_packet_info *cvm_info,
+-					bool ip6)
++					bool ip6,
++					cvm_ipfwd_flow_entry_t *snap)
+ {
++	cvm_ipfwd_flow_entry_t copy, *e;
+ 	u64 saddrhi=0, daddrhi=0, saddrlo=0, daddrlo=0;
+ 	u32 saddr=0, daddr=0, ports=0;
+ 	u8 proto;
+@@ -1069,54 +1135,71 @@ static inline int cvm_ipfwd_find_entry(cvm_ipfwd_flow_bucket_t *bucket,
+ 	}
+ 
+ 	for (idx = 0; idx < CVM_IPFWD_ENTRIES_PER_BUCKET; idx++) {
+-
+-		count = CVM_IPFWD_ENTRY_RETRIES;
+-
+-		/* Read current entry */
+-		do {
+-			*out_entry = &bucket->entry[idx];
+-		} while ((--count >= 0) && ((*out_entry)->s.id0 != (*out_entry)->s.id1));
++		u8 b0, b1, e0, e1;
++
++		/* Take a consistent copy of the entry (see cvm_ipfwd_entry_write_begin) */
++		e = &bucket->entry[idx];
++		for (count = CVM_IPFWD_ENTRY_RETRIES; count >= 0; count--) {
++			cvm_ipfwd_entry_ids(e, &b0, &b1);
++			if (b0 != b1)
++				continue;		/* write in progress */
++			smp_rmb();
++			copy.u.word0 = READ_ONCE(e->u.word0);
++			copy.u.word1 = READ_ONCE(e->u.word1);
++			copy.u.word2 = READ_ONCE(e->u.word2);
++			copy.u.word3 = READ_ONCE(e->u.word3);
++			copy.u.word4 = READ_ONCE(e->u.word4);
++			copy.u.word5 = READ_ONCE(e->u.word5);
++			copy.u.word6 = READ_ONCE(e->u.word6);
++			smp_rmb();
++			cvm_ipfwd_entry_ids(e, &e0, &e1);
++			if (e0 == b1)
++				break;			/* no writer overlapped the copy */
++		}
+ 
+ 		if (count >= 0) {
+ 			/* Test current entry -- compare 5-tuple */
+ 			/* include protocol keys (pppoe, vlan) if present */
+ 
+-		    if(ports != (((*out_entry)->s.l4_dport << 16) | ((*out_entry)->s.l4_sport))) {
++		    if(ports != ((copy.s.l4_dport << 16) | (copy.s.l4_sport))) {
+ 		    	continue;
+ 		    }
+ 
+ 			if(ip6 && !gre) {
+-			    if((saddrhi != (*out_entry)->s.ip_saddrhi) ||
+-			    	(saddrlo != (*out_entry)->s.ip_saddrlo) ||
+-			    	(daddrhi != (*out_entry)->s.ip_daddrhi) ||
+-			    	(daddrlo != (*out_entry)->s.ip_daddrlo)) {
++			    if((saddrhi != copy.s.ip_saddrhi) ||
++			    	(saddrlo != copy.s.ip_saddrlo) ||
++			    	(daddrhi != copy.s.ip_daddrhi) ||
++			    	(daddrlo != copy.s.ip_daddrlo)) {
+ 			    	continue;
+ 			    }
+-			} else if((saddr != (*out_entry)->s.ip_saddr) ||
+-		    			(daddr != (*out_entry)->s.ip_daddr)) {
++			} else if((saddr != copy.s.ip_saddr) ||
++		    			(daddr != copy.s.ip_daddr)) {
+ 				continue;
+ 		    }
+ 		    
+-		    if((proto != (*out_entry)->s.ip_proto)) {
++		    if((proto != copy.s.ip_proto)) {
+ 		    	continue;
+ 		    }
+ 
+-		    if((pppoe ? (pppoe_sid != (*out_entry)->s.pppoe_sid) : 0)) {
++		    if((pppoe ? (pppoe_sid != copy.s.pppoe_sid) : 0)) {
+ 		    	continue;
+ 		    }
+ 
+-		    if((vlan ? (vlan_tci != (*out_entry)->s.vlan_id) : 0)) {
++		    if((vlan ? (vlan_tci != copy.s.vlan_id) : 0)) {
+ 		    	continue;
+ 		    }
+ 
+-		    if(!ip6 && (greKey ? (gre_key != (*out_entry)->s.gre_key) : 0)) {
++		    if(!ip6 && (greKey ? (gre_key != copy.s.gre_key) : 0)) {
+ 		    	continue;
+ 		    }
+ 
+-		    if((vxlan ? (vx_vni != (*out_entry)->s.vx_vni) : 0)) {
++		    if((vxlan ? (vx_vni != copy.s.vx_vni) : 0)) {
+ 		    	continue;
+ 		    }
+ 
++			*out_entry = e;
++			if (snap)
++				*snap = copy;
+ 			return idx;
+ 		}
+ 	}
+@@ -1556,26 +1639,15 @@ int cvm_ipfwd_get_free_entry(cvm_ipfwd_flow_bucket_t *bucket, cvm_ipfwd_flow_ent
+ static void cvm_ipfwd_setup_entry(struct cvm_packet_info *cvm_info, cvm_ipfwd_flow_entry_t *entry, bool ip6)
+ {
+ 	u32 ports;
+-	u8 id;
+ 
+-	id = entry->s.id0 + 1;  /* Cache current id count */
++	cvm_ipfwd_entry_write_begin(entry);
+ 
+-	/* Free flow_info buf if one exists */
+-	if (entry->s.flow_info) {
++	/* Free flow_info buf if one exists (after a grace period) */
++	if (entry->s.flow_info)
+ 		cvm_ipfwd_free_flow_info(phys_to_virt(entry->s.flow_info << 2));
+-		entry->s.flow_info = 0;
+-	}
+-
+-	/* Clear entry */
+-	entry->u.word0 = 0;
+-	entry->u.word1 = 0;
+-	entry->u.word2 = 0;
+-	entry->u.word3 = 0;
+-	entry->u.word4 = 0;
+-	entry->u.word5 = 0;
+-	entry->u.word6 = 0;
+ 
+-	entry->s.id0 = id;
++	/* Clear entry, flow_info included (set by the caller in its own write section) */
++	cvm_ipfwd_entry_clear(entry);
+ 
+ 	if (ip6) {
+ 		struct ipv6hdr_new *rx_ipv6 = (struct ipv6hdr_new *)&cvm_info->cvmip6;
+@@ -1625,7 +1697,7 @@ static void cvm_ipfwd_setup_entry(struct cvm_packet_info *cvm_info, cvm_ipfwd_fl
+ 			entry->s.gre_key = cvm_info->gre.key;
+ 	}
+ 
+-	entry->s.id1 = id;
++	cvm_ipfwd_entry_write_end(entry);
+ }
+ 
+ /**
+@@ -2029,7 +2101,7 @@ static int cvm_ipfwd_ip_cache_flow(struct sk_buff *skb, void *ip, bool ip6)
+ 	spin_lock_irqsave(&bucket->hdr.wr_lock, flags);
+ 
+ 	/* See if a matching entry already exists */
+-	idx = cvm_ipfwd_find_entry(bucket, rx_ip, &entry, cvm_info, ip6);
++	idx = cvm_ipfwd_find_entry(bucket, rx_ip, &entry, cvm_info, ip6, NULL);
+ 	if (idx == CVM_IPFWD_NOT_FOUND) {
+ 		incr_ipfwd_flow_stat(ip6 ? IPV6_CREATE_FLOW_NOT_FOUND : IPV4_CREATE_FLOW_NOT_FOUND);
+ 
+@@ -2069,9 +2141,16 @@ static int cvm_ipfwd_ip_cache_flow(struct sk_buff *skb, void *ip, bool ip6)
+ #endif
+ 	}
+ 
+-	/* See if need to allocate info buffer */
+-	if (!entry->s.flow_info) {
+-       	iptr = kzalloc(sizeof(cvm_ipfwd_flow_info_t), GFP_ATOMIC);
++	/*
++	 * New or changed flow info: never rewrite a buffer the fast path may be
++	 * reading on another core (F2). Build a new one, publish it in a write
++	 * section, and free the old one after a grace period.
++	 */
++	iptr = entry->s.flow_info ? phys_to_virt(entry->s.flow_info << 2) : NULL;
++	if (!iptr || !is_same_flow(skb, ip, iptr) || iptr->rx_ifindex != rx_ifindex) {
++		cvm_ipfwd_flow_info_t *old = iptr;
++
++		iptr = kzalloc(sizeof(cvm_ipfwd_flow_info_t), GFP_ATOMIC);
+ 		if (!iptr) {
+ 			goto done;
+ 		}
+@@ -2080,16 +2159,12 @@ static int cvm_ipfwd_ip_cache_flow(struct sk_buff *skb, void *ip, bool ip6)
+ 		cvm_ipfwd_setup_flow_info(skb, ip, iptr, cvm_info, ip6);
+ 		iptr->rx_ifindex = rx_ifindex;
+ 
+-		/* flow info is ready now */
++		/* flow info is ready now: publish it */
++		cvm_ipfwd_entry_write_begin(entry);
+ 		entry->s.flow_info = virt_to_phys(iptr) >> 2;
+-	} else {
+-		iptr = phys_to_virt(entry->s.flow_info << 2);
+-		if (!is_same_flow(skb, ip, iptr) || iptr->rx_ifindex != rx_ifindex) {
+-			memset(iptr, 0, sizeof(cvm_ipfwd_flow_info_t));
+-			/* Setup info */
+-			cvm_ipfwd_setup_flow_info(skb, ip, iptr, cvm_info, ip6);
+-			iptr->rx_ifindex = rx_ifindex;
+-		}
++		cvm_ipfwd_entry_write_end(entry);
++		if (old)
++			cvm_ipfwd_free_flow_info(old);
+ 	}
+ #ifdef DPI
+     if (!ip6 && cvm_ipv4_dpi) {
+@@ -2153,6 +2228,7 @@ static inline u32 low_level_ip_pkt_process(struct sk_buff *skb, cvmx_wqe_t *wqe,
+ 	struct iphdr *ipv4 = NULL;
+ 	struct ipv6hdr *ipv6 = NULL;
+ 	cvm_ipfwd_flow_entry_t *entry = NULL;
++	cvm_ipfwd_flow_entry_t snap;	/* consistent copy of *entry (F2) */
+ 	cvm_ipfwd_flow_bucket_t *bucket = NULL;
+ 	struct tcphdr *th;
+ 	cvm_ipfwd_flow_info_t *flow_info;
+@@ -2220,7 +2296,7 @@ static inline u32 low_level_ip_pkt_process(struct sk_buff *skb, cvmx_wqe_t *wqe,
+ 	in_bytes = skb->len;
+ 	out_bytes = skb->len;
+ 	
+-	idx = cvm_ipfwd_find_entry(bucket, ip, &entry, cvm_info, ip6);
++	idx = cvm_ipfwd_find_entry(bucket, ip, &entry, cvm_info, ip6, &snap);
+ 	if (idx == CVM_IPFWD_NOT_FOUND) {
+ 		incr_ipfwd_flow_stat(ip6 ? IPV6_FLOW_NOT_FOUND : IPV4_FLOW_NOT_FOUND);
+ 		goto not_found;
+@@ -2235,7 +2311,7 @@ static inline u32 low_level_ip_pkt_process(struct sk_buff *skb, cvmx_wqe_t *wqe,
+ 
+ 	/* Match found */
+ 	/* check its time stamp */
+-	status = cvm_ipfwd_check_timestamp(entry->s.timestamp, entry->s.cache_flush_stamp);
++	status = cvm_ipfwd_check_timestamp(snap.s.timestamp, snap.s.cache_flush_stamp);
+ 	if (status == CVM_IPFWD_EXPIRED) {
+ 		incr_ipfwd_flow_stat(ip6 ? IPV6_FLOW_FOUND_EXPIRED : IPV4_FLOW_FOUND_EXPIRED);
+ 		goto not_found;
+@@ -2253,16 +2329,16 @@ static inline u32 low_level_ip_pkt_process(struct sk_buff *skb, cvmx_wqe_t *wqe,
+ 
+ #if IPFWD_ENABLE_FILTER
+ 	/* check flow action */
+-	if (entry->s.action == IPFWD_BYPASS) {
++	if (snap.s.action == IPFWD_BYPASS) {
+ 		incr_ipfwd_flow_stat(ip6 ? IPV6_FLOW_FOUND_ACTION_BYPASS : IPV4_FLOW_FOUND_ACTION_BYPASS);
+ 		goto bypass_packet;
+ 	}
+ #endif
+ 
+ 	/* If we get here, entry is not expired */
+-	if (entry->s.flow_info) {
++	if (snap.s.flow_info) {
+ 		/* match found -- format header */
+-		flow_info = phys_to_virt(entry->s.flow_info << 2);
++		flow_info = phys_to_virt(snap.s.flow_info << 2);
+ 		prefetch(flow_info);
+ 		prefetchw(skb);
+ 
+@@ -2485,7 +2561,7 @@ transmit_pkt:
+ 		update_ipfwd_stats(in_flow, out_flow, ret, false, in_bytes, out_bytes);
+ 
+ #ifdef CONFIG_UBNT_E300
+-		ubnt_offload_stats_upd(entry->s.vlan_id, 1, in_bytes, 0, 0);
++		ubnt_offload_stats_upd(snap.s.vlan_id, 1, in_bytes, 0, 0);
+ 		ubnt_offload_stats_upd(flow_info->vlan_tag, 0, 0, 1, out_bytes);
+ #endif
+ 
+@@ -2964,7 +3040,10 @@ u32 pkt_receive(struct sk_buff *skb)
+ {
+ 	int ret;
+ 
++	/* flow entries and flow_info are read locklessly: see cvm_ipfwd_free_flow_info() */
++	rcu_read_lock();
+ 	ret = low_level_pkt_rcv(skb, NULL);
++	rcu_read_unlock();
+ 
+ 	if (cvmx_likely(ret != CVM_IPFWD_RET_FAILED))
+ 		return 0;
+@@ -2974,7 +3053,13 @@ u32 pkt_receive(struct sk_buff *skb)
+ 
+ platform_callback_result_t pkt_receive_cb(struct net_device *dev, void *wqe, struct sk_buff *skb)
+ {
+-	return (low_level_pkt_rcv(skb, (cvmx_wqe_t*) wqe));
++	platform_callback_result_t ret;
++
++	/* as in pkt_receive() */
++	rcu_read_lock();
++	ret = low_level_pkt_rcv(skb, (cvmx_wqe_t*) wqe);
++	rcu_read_unlock();
++	return ret;
+ }
+ 
+ 
+@@ -3353,7 +3438,7 @@ static ssize_t ipv4_fwd_write(struct file *file, const char __user *input,
+ 			}
+ 
+ 			CVMX_SYNC;
+-			cvmx_wait(20000);
++			synchronize_net();	/* let fast-path readers finish before freeing */
+ 
+ 			cvm_gbl_ipv4_fwd_cache = cache;
+ 			cvm_ipfwd_init_cache(cvm_gbl_ipv4_fwd_cache, ipv4_cache_size);
+@@ -3368,7 +3453,7 @@ static ssize_t ipv4_fwd_write(struct file *file, const char __user *input,
+ 			clear_ipv4_bit(ipfwd_flags);
+ 
+ 			CVMX_SYNC;
+-			cvmx_wait(20000);
++			synchronize_net();	/* let fast-path readers finish before freeing */
+ 
+ 			cvm_ipfwd_flush_cache(cvm_gbl_ipv4_fwd_cache, ipv4_cache_size, CVM_IPFWD_ENTRIES_PER_BUCKET);
+ 			vfree((void *)cvm_gbl_ipv4_fwd_cache);
+@@ -4006,7 +4091,7 @@ static ssize_t ipv6_fwd_write(struct file *file, const char __user *input,
+ 			}
+ 
+ 			CVMX_SYNC;
+-			cvmx_wait(20000);
++			synchronize_net();	/* let fast-path readers finish before freeing */
+ 
+ 			cvm_gbl_ipv6_fwd_cache = cache;
+ 			cvm_ipfwd_init_cache(cvm_gbl_ipv6_fwd_cache, ipv6_cache_size);
+@@ -4018,7 +4103,7 @@ static ssize_t ipv6_fwd_write(struct file *file, const char __user *input,
+ 	} else {
+ 		if (cvm_ipv6_fwd && cvm_gbl_ipv6_fwd_cache) {
+ 			CVMX_SYNC;
+-			cvmx_wait(20000);
++			synchronize_net();	/* let fast-path readers finish before freeing */
+ 
+ 			cvm_ipfwd_flush_cache(cvm_gbl_ipv6_fwd_cache, ipv6_cache_size, CVM_IPFWD_ENTRIES_PER_BUCKET);
+ 			vfree((void *)cvm_gbl_ipv6_fwd_cache);
+diff --git a/ipfwd_common.h b/ipfwd_common.h
+index a1511ce..3807481 100644
+--- a/ipfwd_common.h
++++ b/ipfwd_common.h
+@@ -249,6 +249,7 @@ typedef struct {
+ #endif
+ 	struct net_device	*cache_show_dev_rx;
+ 	struct net_device	*cache_show_dev_tx;
++	struct rcu_head	rcu;	/* freed after an RCU grace period: the fast path reads it locklessly */
+ } cvm_ipfwd_flow_info_t;
+ 
+ extern int ipv6_cache_size; /* Number of hash buckets for ipv6 in the flow LUT (module param, must be power of 2) */
+-- 
+2.47.3
+

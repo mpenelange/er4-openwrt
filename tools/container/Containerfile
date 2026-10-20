@@ -1,0 +1,15 @@
+# Build container for the ER-4 image: OpenWrt's build prerequisites, Node.js for the web UI,
+# and what tools/kernel-config.sh needs. Run it rootless as your own user (docs/building.md):
+#   podman build -t er4-build -f tools/container/Containerfile tools/container
+#   podman run --rm -it --userns=keep-id -v "$PWD:$PWD:Z" -w "$PWD" er4-build bash
+FROM docker.io/library/debian:trixie
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential bison flex bc gawk libssl-dev libelf-dev libncurses-dev zlib1g-dev \
+        python3 python3-setuptools swig git ca-certificates curl wget rsync file unzip \
+        bzip2 xz-utils zstd cpio nodejs npm \
+    && rm -rf /var/lib/apt/lists/*
+
+# --userns=keep-id runs as your own uid, which has no home in the image; npm and git want one
+RUN mkdir -m 1777 /home/build
+ENV HOME=/home/build

@@ -1,0 +1,32 @@
+From 0571581316d7dafab85565c6bce1744a99b2a567 Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 17:06:16 +0000
+Subject: [PATCH 07/10] MIPS: Octeon: match cvmx_pko3_sq_config_children() to its prototype
+
+The header declares child_level as unsigned (cvmx-pko3.h includes
+cvmx-pko3-queue.h before it defines enum cvmx_pko3_level_e, so the
+prototype can't use the enum), the definition as the enum. GCC 13+
+rejects this with -Werror=enum-int-mismatch, which -Wno-error doesn't
+turn off. Use unsigned in the definition too; the values are the same.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/mips/cavium-octeon/executive/cvmx-pko3-queue.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/mips/cavium-octeon/executive/cvmx-pko3-queue.c b/arch/mips/cavium-octeon/executive/cvmx-pko3-queue.c
+index f462e4136..e270bd577 100644
+--- a/arch/mips/cavium-octeon/executive/cvmx-pko3-queue.c
++++ b/arch/mips/cavium-octeon/executive/cvmx-pko3-queue.c
+@@ -892,7 +892,7 @@ int cvmx_pko3_pq_config(unsigned node, unsigned mac_num, unsigned pq_num)
+  * Note: this function supports the configuration of node-local unit.
+  */
+ int cvmx_pko3_sq_config_children(unsigned int node,
+-			enum cvmx_pko3_level_e child_level,
++			unsigned child_level,
+ 			unsigned parent_queue, unsigned child_base,
+ 			unsigned child_count, int stat_prio_count)
+ {
+-- 
+2.47.3
+

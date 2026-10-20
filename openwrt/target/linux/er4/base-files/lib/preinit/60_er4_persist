@@ -1,0 +1,38 @@
+# Persistent /etc for the ER-4 when it boots from eMMC.
+# The whole system is the kernel's initramfs (p1:vmlinux.64, replaced as a unit on upgrade);
+# only /etc persists, as an overlay whose upper layer lives on p2 (EdgeOS's ext3 partition,
+# in its own directory er4/, next to EdgeOS's files, which stay untouched).
+# Stock U-Boot's eMMC boot passes EdgeOS's arguments (rootsqimg=...); a TFTP netboot doesn't,
+# so netbooted test images stay purely in RAM. Must run before 70_initramfs_test, which ends
+# preinit_main in initramfs mode; failsafe (30/40) has already been decided by then.
+ER4_DATA=/mnt/er4data
+
+er4_persist() {
+	local i
+
+	[ -n "$INITRAMFS" ] || return 0
+	grep -q 'rootsqimg=' /proc/cmdline || return 0
+
+	# The eMMC probes late, and preinit's /dev doesn't get block nodes by itself:
+	# wait for the partition in sysfs and create the node from its major:minor
+	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+		[ -e /sys/class/block/mmcblk0p2/dev ] && break
+		sleep 1
+	done
+	[ -b /dev/mmcblk0p2 ] || {
+		local dev
+		dev=$(cat /sys/class/block/mmcblk0p2/dev 2>/dev/null) && \
+			mknod /dev/mmcblk0p2 b "${dev%:*}" "${dev#*:}"
+	}
+	mkdir -p "$ER4_DATA"
+	mount -t ext4 -o noatime /dev/mmcblk0p2 "$ER4_DATA" || {
+		echo "- er4: can't mount mmcblk0p2, /etc is not persistent -"
+		return 0
+	}
+	mkdir -p "$ER4_DATA/er4/etc" "$ER4_DATA/er4/.etc-work"
+	mount -t overlay overlay \
+		-o "lowerdir=/etc,upperdir=$ER4_DATA/er4/etc,workdir=$ER4_DATA/er4/.etc-work" /etc && \
+		echo "- er4: /etc persistent on mmcblk0p2:/er4/etc -"
+}
+
+boot_hook_add preinit_main er4_persist

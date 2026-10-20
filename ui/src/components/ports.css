@@ -1,0 +1,32 @@
+/* ER-4 port tiles (components/ports.tsx), matching the dashboard's port panel. Tokens only. */
+.portpanel { min-width: 0; }
+.portpanel .ports { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px; padding: 2px; border-radius: var(--radius); background: var(--surface-3); border: 1px solid var(--border-strong); }
+
+.portpanel .port {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 0;
+  padding: var(--sp-2) 10px; font: inherit; color: var(--text-primary); text-align: left;
+  background: var(--surface-2); border: 0; border-radius: 0;
+}
+.portpanel .port:first-child { border-radius: 4px 0 0 4px; }
+.portpanel .port:last-child { border-radius: 0 4px 4px 0; }
+.portpanel .port.clickable { cursor: pointer; transition: background 0.1s; }
+.portpanel .port.clickable:hover { background: var(--surface-1); }
+.portpanel .port.clickable:hover .pname { text-decoration: underline; }
+.portpanel .port.selected { box-shadow: inset 0 0 0 2px var(--accent); }
+.portpanel .port.idle .pname, .portpanel .port.idle .nets { color: var(--text-muted); }
+
+.portpanel .pname { font-family: var(--mono); font-weight: 650; }
+.portpanel .role { font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-secondary); }
+.portpanel .nets { display: flex; flex-direction: column; gap: 1px; max-width: 100%; font-size: var(--fs-sm); }
+.portpanel .net { display: flex; align-items: center; gap: 5px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.portpanel .net .sw { flex: none; width: 10px; height: 3px; border-radius: 2px; background: var(--c); }
+.portpanel .net .sw.tagged { background: repeating-linear-gradient(90deg, var(--c) 0 2px, transparent 2px 4px); }
+.portpanel .link { display: flex; align-items: center; gap: 5px; margin-top: 2px; font-size: var(--fs-sm); color: var(--text-muted); }
+.portpanel .link .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); opacity: 0.6; }
+.portpanel .link.up { color: var(--text-primary); font-weight: 550; }
+.portpanel .link.up .dot { background: var(--good); opacity: 1; }
+.portpanel .tag { font-size: var(--fs-xs); line-height: 15px; font-weight: 650; padding: 0 4px; border-radius: 3px; background: var(--surface-3); color: var(--text-secondary); }
+.portpanel .tag.accent { background: var(--accent-soft); color: var(--text-primary); }
+
+.portpanel.compact .port { padding: var(--sp-1) var(--sp-2); gap: 2px; }
+.portpanel.compact .nets, .portpanel.compact .link { font-size: var(--fs-xs); }

@@ -1,0 +1,45 @@
+From 2539a7d26cb5dfda846003141810d3a8216f4f4a Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 20:39:54 +0000
+Subject: [PATCH 15/18] Remove the cache_size proc entries on unload
+
+rmmod (reachable via /etc/init.d/offload restart) removed /proc/cavium/ipv4
+and ipv6 while cache_size was still in them: two 'removing non-empty
+directory' kernel warnings and leaked proc entries.
+
+Regression-tested on an eMMC-installed OpenWrt build with the forwarding,
+NAT and offload safety tests: all pass. The flow-churn stress test doesn't
+crash; one run right after a stress test and a
+module reload showed many rx drops and a short throughput dip at every
+phase, which is still being looked into.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ipfwd.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/ipfwd.c b/ipfwd.c
+index 28453ec..6714a0d 100644
+--- a/ipfwd.c
++++ b/ipfwd.c
+@@ -3445,6 +3445,8 @@ static void cvm_ipv4_clean_proc(void)
+ 	if (ipfwd_proc.ipv4.dpi)
+ 		remove_proc_entry("dpi", ipfwd_proc.ipv4.dir);
+ #endif
++	if (ipfwd_proc.ipv4.cache_size)
++		remove_proc_entry("cache_size", ipfwd_proc.ipv4.dir);
+ 	if (ipfwd_proc.ipv4.dir)
+ 		remove_proc_entry("ipv4", ipfwd_proc.dir);
+ }
+@@ -4102,6 +4104,8 @@ static void cvm_ipv6_clean_proc(void)
+ 		remove_proc_entry("vlan", ipfwd_proc.ipv6.dir);
+ 	if (ipfwd_proc.ipv6.fwd)
+ 		remove_proc_entry("fwd", ipfwd_proc.ipv6.dir);
++	if (ipfwd_proc.ipv6.cache_size)
++		remove_proc_entry("cache_size", ipfwd_proc.ipv6.dir);
+ 	if (ipfwd_proc.ipv6.dir)
+ 		remove_proc_entry("ipv6", ipfwd_proc.dir);
+ }
+-- 
+2.47.3
+

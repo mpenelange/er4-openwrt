@@ -1,0 +1,10 @@
+#!/bin/sh
+# Keeps the dashboard's history going while no one has the UI open: the er4 rpcd plugin records
+# a sample into its 5 min / 1 h / 24 h rings on every er4.stats call (er4.uc, remember()), and
+# otherwise only the open dashboard calls it. Every 5 s: within the 5-minute view's gap
+# threshold (3 x its 2 s step), and the coarser rings take every 3rd and 24th sample.
+# Started by /etc/init.d/er4-statsmon (procd respawns it).
+while :; do
+	ubus -t 5 call er4 stats >/dev/null 2>&1
+	sleep 5
+done

@@ -1,0 +1,100 @@
+From e5ae2af7cb29304b0fb0af1450616ddd5ff471ce Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 00:39:34 -0500
+Subject: [PATCH 18/18] Reword comments that pointed at internal review notes
+
+Several comments named findings from a security review that isn't part of
+this source ("security audit F1", "(F2)", ...). Say what they mean instead.
+Comments only; no code change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ipfwd.c                            | 18 +++++++++---------
+ platform/octeon/src/platform_api.c |  7 ++++---
+ 2 files changed, 13 insertions(+), 12 deletions(-)
+
+diff --git a/ipfwd.c b/ipfwd.c
+index 9a45370..86eac92 100644
+--- a/ipfwd.c
++++ b/ipfwd.c
+@@ -245,8 +245,8 @@ uint8_t cvm_gbl_ipfwd_cache_flush_stamp = 0;
+ /*
+  * Free a flow_info buffer. The rx fast path uses flow_info without taking the
+  * bucket lock, so it may still be reading a buffer that the learn path just
+- * replaced on another core (security audit F2): free only after an RCU grace
+- * period. The rx hook runs in NAPI softirq, an RCU read-side section.
++ * replaced on another core: free only after an RCU grace period. The rx
++ * hook runs in NAPI softirq, an RCU read-side section.
+  *
+  * Test builds (make IPFWD_POISON=1) overwrite the buffer with POISON_FREE
+  * when it is finally freed, so any use after the grace period shows up.
+@@ -533,7 +533,7 @@ static void print_flow_info(struct seq_file *file, int bkt_no, int ent_no, cvm_i
+ 
+ 	/* Leading machine-readable token so a test can map a flow to its bucket
+ 	 * (the bucket-collision test reads this). The hash that picks the bucket is keyed
+-	 * per boot since F4, so this placement is not predictable off-box. */
++	 * per boot, so this placement is not predictable off-box. */
+ 	seq_printf(file, "B%d/%d ", bkt_no, ent_no);
+ 
+ 	if (test_pppoe_hdr(&flow_info->pkt_flags)) {
+@@ -1931,9 +1931,9 @@ static void cvm_ipfwd_setup_flow_info(struct sk_buff *skb, void *ip,
+ /*
+  * The flow key is the 5-tuple plus VLAN/PPPoE ids, without the port the packet
+  * arrived on, so a frame with a cached flow's tuple was fast-path forwarded
+- * whichever port it came in on: past rp_filter, zone policy and conntrack
+- * (security audit F1). Record the physical port each flow is learned on and
+- * only accept hits from that port.
++ * whichever port it came in on: past rp_filter, zone policy and conntrack.
++ * Record the physical port each flow is learned on and only accept hits
++ * from that port.
+  *
+  * At learn time skb_iif is the device the packet was received on after VLAN
+  * untagging (e.g. eth3.30); the rx hook runs before untagging and sees the
+@@ -2199,7 +2199,7 @@ static int cvm_ipfwd_ip_cache_flow(struct sk_buff *skb, void *ip, bool ip6)
+ 
+ 	/*
+ 	 * New or changed flow info: never rewrite a buffer the fast path may be
+-	 * reading on another core (F2). Build a new one, publish it in a write
++	 * reading on another core. Build a new one, publish it in a write
+ 	 * section, and free the old one after a grace period.
+ 	 */
+ 	iptr = entry->s.flow_info ? phys_to_virt(entry->s.flow_info << 2) : NULL;
+@@ -2284,7 +2284,7 @@ static inline u32 low_level_ip_pkt_process(struct sk_buff *skb, cvmx_wqe_t *wqe,
+ 	struct iphdr *ipv4 = NULL;
+ 	struct ipv6hdr *ipv6 = NULL;
+ 	cvm_ipfwd_flow_entry_t *entry = NULL;
+-	cvm_ipfwd_flow_entry_t snap;	/* consistent copy of *entry (F2) */
++	cvm_ipfwd_flow_entry_t snap;	/* consistent copy of *entry */
+ 	cvm_ipfwd_flow_bucket_t *bucket = NULL;
+ 	struct tcphdr *th;
+ 	cvm_ipfwd_flow_info_t *flow_info;
+@@ -2398,7 +2398,7 @@ static inline u32 low_level_ip_pkt_process(struct sk_buff *skb, cvmx_wqe_t *wqe,
+ 		prefetch(flow_info);
+ 		prefetchw(skb);
+ 
+-		/* Only from the port the flow was learned on (F1) */
++		/* Only from the port the flow was learned on */
+ 		if (unlikely(flow_info->rx_ifindex != skb->dev->ifindex))
+ 			goto not_found;
+ 
+diff --git a/platform/octeon/src/platform_api.c b/platform/octeon/src/platform_api.c
+index a97a882..ab779b2 100644
+--- a/platform/octeon/src/platform_api.c
++++ b/platform/octeon/src/platform_api.c
+@@ -28,9 +28,10 @@
+  * Flow cache bucket index. This used to be the CPU's CRC unit (CRC32C, fixed
+  * IV) over the tuple: unkeyed and linear, so anyone could compute tuples that
+  * share a bucket with a victim flow and keep evicting it to the slow path
+- * (security audit F4). A random CRC IV would not help: for equal-length
+- * inputs the IV cancels out of the XOR of two CRCs. Use the kernel's keyed
+- * hsiphash with a per-boot random key, as mainline does for conntrack.
++ * (a targeted denial of service). A random CRC IV would not help: for
++ * equal-length inputs the IV cancels out of the XOR of two CRCs. Use the
++ * kernel's keyed hsiphash with a per-boot random key, as mainline does for
++ * conntrack.
+  */
+ static hsiphash_key_t ipfwd_hash_key __read_mostly;
+ 
+-- 
+2.47.3
+

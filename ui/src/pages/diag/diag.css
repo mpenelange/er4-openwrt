@@ -1,0 +1,38 @@
+/* Diagnostics page */
+.log-search { width: 130px; }
+.log-follow { gap: 6px; font-size: var(--fs-sm); color: var(--text-secondary); cursor: pointer; }
+.diag-page .card-head { flex-wrap: wrap; height: auto; min-height: 36px; padding-block: 4px; row-gap: 4px; }
+.diag-page .card-head h3 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log { max-height: calc(100vh - 230px); min-height: 200px; overflow: auto; font-family: var(--mono); font-size: var(--fs-sm); line-height: 1.55; }
+.log-row { display: grid; grid-template-columns: 9.5ch 64px minmax(0, 1fr); gap: var(--sp-2); padding: 1px var(--sp-3); border-bottom: 1px solid var(--border); }
+.log-row:hover { background: var(--surface-2); }
+.log-row.critical { background: rgba(208, 59, 59, 0.07); }
+.log-row.warning { background: rgba(214, 150, 20, 0.06); }
+.log-time { color: var(--text-muted); white-space: nowrap; }
+.log-level { display: flex; align-items: flex-start; }
+.log-level .badge { height: 17px; padding: 0 5px; font-family: var(--font); }
+.log-msg { overflow-wrap: anywhere; white-space: pre-wrap; }
+.log-tag { margin-right: 0.6ch; color: var(--text-secondary); font-weight: 600; }
+
+.tool-form { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+.tool-host { flex: 1 1 180px; font-family: var(--mono); }
+.tool-server { flex: 0 1 170px; font-family: var(--mono); }
+.tool-quick { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--sp-2); }
+.tool-quick .chip { height: 22px; padding: 0 8px; font-weight: 450; }
+.tool-out { margin: 0; padding: var(--sp-3); min-height: 80px; max-height: calc(100vh - 330px); overflow: auto; font-family: var(--mono); font-size: var(--fs-sm); line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ping-sum { gap: 6px; font-size: var(--fs-sm); }
+.ping-sum b { color: var(--text-primary); font-weight: 600; }
+
+.diag-page .table-wrap { overflow-x: auto; }
+@media (max-width: 560px) {
+  .log-row { grid-template-columns: auto minmax(0, 1fr); row-gap: 0; }
+  .log-msg { grid-column: 1 / -1; }
+}
+
+.ct-nat { font-size: var(--fs-xs); }
+.ct-more { padding: var(--sp-2) var(--sp-3); font-size: var(--fs-sm); border-top: 1px solid var(--border); }
+.wan-sum { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-4); font-size: var(--fs-sm); }
+.wan-sum b { font-weight: 650; }
+
+.nft-text { margin: 0; padding: var(--sp-2) var(--sp-3); max-height: 70vh; overflow: auto; font-size: var(--fs-xs); line-height: 1.5; white-space: pre; tab-size: 4; }
+.proc-cmd { display: inline-block; max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }

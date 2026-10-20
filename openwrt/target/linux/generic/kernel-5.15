@@ -1,0 +1,3 @@
+# Only used for naming: the ER-4 target builds an external tree (UEK7 U3, 5.15 + LTS .221)
+LINUX_VERSION-5.15 = .221
+LINUX_KERNEL_HASH-5.15.221 = skip

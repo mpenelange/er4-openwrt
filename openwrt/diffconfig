@@ -1,0 +1,56 @@
+CONFIG_TARGET_er4=y
+CONFIG_TARGET_er4_generic=y
+CONFIG_TARGET_er4_generic_DEVICE_ubnt_edgerouter-4=y
+CONFIG_DEVEL=y
+CONFIG_EXTERNAL_KERNEL_TREE="@ROOT@/src/uek7-openwrt"
+# The initramfs kernel is the image that gets installed (images/*.bin)
+CONFIG_TARGET_ROOTFS_INITRAMFS=y
+CONFIG_TARGET_ROOTFS_EXT4FS=y
+CONFIG_PACKAGE_kmod-cavium-ip-offload=y
+# arch/mips builds with -Werror; GCC 14 warns about some UEK/SDK code
+CONFIG_KERNEL_CFLAGS="-Wno-error"
+# WireGuard: the kernel side is built in (CONFIG_WIREGUARD=y)
+CONFIG_PACKAGE_wireguard-tools=y
+# Compressed initramfs: the FAT boot partition holds two images plus EdgeOS's kernels.
+# zstd: the kernel decompresses it quickly at boot (CONFIG_RD_ZSTD=y).
+CONFIG_TARGET_INITRAMFS_COMPRESSION_ZSTD=y
+# The web UI at http://<router>/ instead of LuCI. It keeps the API backends LuCI would bring
+# (rpcd-mod-luci for luci-rpc, cgi-io for uploads and backups); er4-ui depends on them.
+CONFIG_PACKAGE_er4-ui=y
+# Tailscale (VPN page) isn't in the image: er4-ui fetches Tailscale's own build onto the eMMC
+# when it's set up, and Tailscale updates itself from then on (er4-tailscale-fetch)
+# CONFIG_PACKAGE_tailscale is not set
+# No package manager: the root filesystem is in RAM, so nothing it installed would survive a
+# reboot. (Tailscale's updater would also pick apk over updating its own binaries.)
+# CONFIG_PACKAGE_apk-mbedtls is not set
+# IPsec / IKEv2 (VPN page): strongSwan via swanctl and UCI 'ipsec' (/etc/init.d/swanctl), openssl
+# crypto, EAP-MSCHAPv2 for phones and laptops (username + password), pki for the server cert
+CONFIG_PACKAGE_strongswan=y
+CONFIG_PACKAGE_strongswan-swanctl=y
+CONFIG_PACKAGE_strongswan-charon=y
+CONFIG_PACKAGE_strongswan-libtls=y
+CONFIG_PACKAGE_strongswan-pki=y
+CONFIG_PACKAGE_strongswan-mod-openssl=y
+CONFIG_PACKAGE_strongswan-mod-kdf=y
+CONFIG_PACKAGE_strongswan-mod-kernel-netlink=y
+CONFIG_PACKAGE_strongswan-mod-socket-default=y
+CONFIG_PACKAGE_strongswan-mod-random=y
+CONFIG_PACKAGE_strongswan-mod-pem=y
+CONFIG_PACKAGE_strongswan-mod-x509=y
+CONFIG_PACKAGE_strongswan-mod-pubkey=y
+CONFIG_PACKAGE_strongswan-mod-pkcs1=y
+CONFIG_PACKAGE_strongswan-mod-pkcs8=y
+CONFIG_PACKAGE_strongswan-mod-constraints=y
+CONFIG_PACKAGE_strongswan-mod-updown=y
+CONFIG_PACKAGE_strongswan-mod-attr=y
+CONFIG_PACKAGE_strongswan-mod-eap-identity=y
+CONFIG_PACKAGE_strongswan-mod-eap-mschapv2=y
+CONFIG_PACKAGE_strongswan-mod-md4=y
+CONFIG_PACKAGE_strongswan-mod-des=y
+# netifd 'xfrm' interfaces: IPsec traffic gets its own network/zone (child if_id), not the WAN's
+CONFIG_PACKAGE_kmod-ipsec=y
+CONFIG_PACKAGE_xfrm=y
+# tcrypt: crypto speed tests for the Octeon AES/GHASH drivers (insmod tcrypt mode=... sec=1)
+CONFIG_PACKAGE_kmod-crypto-test=y
+# 6in4 tunnel (Network page, WAN drawer: IPv6 through a tunnel broker when the ISP has none)
+CONFIG_PACKAGE_6in4=y

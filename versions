@@ -1,0 +1,8 @@
+# The upstream sources the image is built from. openwrt/setup.sh checks that src/ has these
+# checked out, and the build instructions (docs/building.md) clone them.
+# OpenWrt release tag; the tag's feeds.conf.default pins the package feeds
+OPENWRT_TAG=v25.12.5
+# Oracle UEK7 (https://github.com/oracle/linux-uek): the branch to clone and the tag that
+# patches/uek7 applies to
+UEK7_BRANCH=uek7/u3
+UEK7_TAG=v5.15.0-326.221.1

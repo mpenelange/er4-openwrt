@@ -1,0 +1,56 @@
+From 49aa8469fbdc43efbd1932bed93ac0b629f937da Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 21:41:09 -0500
+Subject: [PATCH 10/18] Tag each flow in the /proc cache dump with its bucket
+
+print_flow_info() now prefixes every row with a "B<bucket>/<entry>" token
+(the bucket index was computed in print_flow_entry but never shown). Debug
+output only, behind the existing IPFWD_CACHE_SHOW.
+
+This is test instrumentation for the next patch: a bucket-collision test reads
+the token to learn which bucket a flow lands in, so it can find tuples that
+share a victim flow's bucket and check whether crafted collisions still
+target it after the hash is keyed.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ ipfwd.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/ipfwd.c b/ipfwd.c
+index 2892f0f..08e614b 100644
+--- a/ipfwd.c
++++ b/ipfwd.c
+@@ -498,7 +498,7 @@ static ssize_t ipv6_fwd_cache_write(struct file *file, const char __user *buffer
+ }
+ 
+ #if IPFWD_CACHE_SHOW
+-static void print_flow_info(struct seq_file *file, cvm_ipfwd_flow_entry_t *flow_entry, cvm_ipfwd_flow_info_t *flow_info)
++static void print_flow_info(struct seq_file *file, int bkt_no, int ent_no, cvm_ipfwd_flow_entry_t *flow_entry, cvm_ipfwd_flow_info_t *flow_info)
+ {
+ 	struct pppoe_hdr *ph = NULL;
+ 	int pppoe_sid = 0;
+@@ -506,6 +506,11 @@ static void print_flow_info(struct seq_file *file, cvm_ipfwd_flow_entry_t *flow_
+ 	if (!flow_info)
+ 		return;
+ 
++	/* Leading machine-readable token so a test can map a flow to its bucket
++	 * (the bucket-collision test reads this). The hash that picks the bucket is keyed
++	 * per boot since F4, so this placement is not predictable off-box. */
++	seq_printf(file, "B%d/%d ", bkt_no, ent_no);
++
+ 	if (test_pppoe_hdr(&flow_info->pkt_flags)) {
+ 		if (test_vlan_hdr(&flow_info->pkt_flags))
+ 			ph = (struct pppoe_hdr *)(flow_info->l2_hdr + ETH_HLEN + VLAN_HLEN);
+@@ -577,7 +582,7 @@ static void print_flow_entry(struct seq_file *file)
+ 
+ 				if (flow_entry->s.flow_info != 0) {
+ 					flow_info = phys_to_virt(flow_entry->s.flow_info << 2);
+-					print_flow_info(file, flow_entry, flow_info);
++					print_flow_info(file, bkt_no, ent_no, flow_entry, flow_info);
+ 				}
+ 			}
+ 		}
+-- 
+2.47.3
+

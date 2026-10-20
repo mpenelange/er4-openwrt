@@ -1,0 +1,11 @@
+#!/bin/sh
+# SSH by key only on a factory-fresh /etc: stock dropbear
+# allows password login, and until the UI's first-boot setup sets one, root has none.
+# A box whose root already has a password (an upgrade) keeps its SSH settings.
+grep -q '^root::' /etc/shadow || exit 0
+for s in $(uci -q show dropbear | sed -n 's/^dropbear\.\([^.=]*\)=dropbear$/\1/p'); do
+	uci set dropbear.$s.PasswordAuth=off
+	uci set dropbear.$s.RootPasswordAuth=off
+done
+uci commit dropbear
+exit 0

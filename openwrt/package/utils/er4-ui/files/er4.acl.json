@@ -1,0 +1,163 @@
+{
+	"er4-ui": {
+		"description": "ER-4 web UI: everything the UI reads and writes (it must not rely on LuCI's ACLs)",
+		"read": {
+			"ubus": {
+				"er4": [
+					"stats",
+					"history",
+					"offload",
+					"neighbors",
+					"firmware_info",
+					"firmware_check",
+					"firmware_status",
+					"timezones",
+					"wg_instances",
+					"log",
+					"routes",
+					"diag_poll",
+					"conntrack",
+					"ssh_keys",
+					"wan_health",
+					"firewall_status",
+					"processes",
+					"crontab",
+					"capture_status",
+					"tailscale_status",
+					"ipsec_status"
+				],
+				"luci-rpc": [
+					"getDHCPLeases",
+					"getHostHints"
+				],
+				"network.interface": [
+					"dump"
+				],
+				"network.device": [
+					"status"
+				],
+				"system": [
+					"board",
+					"info"
+				],
+				"session": [
+					"access"
+				],
+				"uci": [
+					"configs",
+					"get",
+					"changes"
+				],
+				"rc": [
+					"list"
+				]
+			},
+			"uci": [
+				"network",
+				"dhcp",
+				"firewall",
+				"system",
+				"offload",
+				"dropbear",
+				"ipsec"
+			],
+			"cgi-io": [
+				"backup",
+				"download"
+			],
+			"file": {
+				"/tmp/er4-capture.pcap": [
+					"read"
+				]
+			}
+		},
+		"write": {
+			"ubus": {
+				"session": [
+					"destroy"
+				],
+				"uci": [
+					"add",
+					"set",
+					"delete",
+					"order",
+					"revert",
+					"apply",
+					"confirm",
+					"rollback"
+				],
+				"er4": [
+					"firmware_verify",
+					"firmware_install",
+					"firmware_download",
+					"boot_previous",
+					"reboot",
+					"tailscale_install",
+					"tailscale_update",
+					"config_inspect",
+					"config_restore",
+					"factory_reset",
+					"set_password",
+					"set_localtime",
+					"wg_keypair",
+					"diag_start",
+					"diag_stop",
+					"iface_restart",
+					"ssh_keys_set",
+					"kill",
+					"crontab_set",
+					"capture_start",
+					"capture_stop",
+					"tailscale_up",
+					"tailscale_logout",
+					"ipsec_cert"
+				],
+				"network.interface.*": [
+					"up",
+					"down",
+					"renew"
+				],
+				"rc": [
+					"init"
+				]
+			},
+			"uci": [
+				"network",
+				"dhcp",
+				"firewall",
+				"system",
+				"offload",
+				"dropbear",
+				"ipsec"
+			],
+			"cgi-io": [
+				"upload"
+			],
+			"file": {
+				"/tmp/firmware.bin": [
+					"write"
+				],
+				"/tmp/backup.tar.gz": [
+					"write"
+				]
+			}
+		}
+	},
+	"unauthenticated": {
+		"description": "First-boot setup: set the root password while none is set (er4.setup_password refuses otherwise)",
+		"read": {
+			"ubus": {
+				"er4": [
+					"setup_status"
+				]
+			}
+		},
+		"write": {
+			"ubus": {
+				"er4": [
+					"setup_password"
+				]
+			}
+		}
+	}
+}

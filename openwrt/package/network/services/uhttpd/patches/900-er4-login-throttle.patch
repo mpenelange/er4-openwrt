@@ -1,0 +1,184 @@
+diff -urN a/ubus.c b/ubus.c
+--- a/ubus.c	2026-10-17 11:23:45.901358324 -0500
++++ b/ubus.c	2026-10-17 11:23:58.333375602 -0500
+@@ -23,6 +23,7 @@
+ #include <libubox/avl-cmp.h>
+ #include <stdio.h>
+ #include <poll.h>
++#include <time.h>
+ 
+ #include "uhttpd.h"
+ #include "plugin.h"
+@@ -87,6 +88,7 @@
+ 	ERROR_SESSION,
+ 	ERROR_ACCESS,
+ 	ERROR_TIMEOUT,
++	ERROR_THROTTLED,
+ 	__ERROR_MAX
+ };
+ 
+@@ -103,6 +105,7 @@
+ 	[ERROR_SESSION] = { -32001, "Session not found" },
+ 	[ERROR_ACCESS] = { -32002, "Access denied" },
+ 	[ERROR_TIMEOUT] = { -32003, "ubus request timed out" },
++	[ERROR_THROTTLED] = { -32004, "Too many failed logins, try again later" },
+ };
+ 
+ enum cors_hdr {
+@@ -444,6 +447,111 @@
+ 	}
+ }
+ 
++/*
++ * Failed session.login throttle, per client address (stock uhttpd allowed ~17 guesses/s with
++ * no lockout). rpcd never sees the client, so uhttpd counts: LOGIN_FREE failures pass, then
++ * each further one locks that address out for 2, 4, ... up to LOGIN_MAX_WAIT seconds; a
++ * login attempted while locked out is refused without asking rpcd. A success, or
++ * LOGIN_FORGET seconds without a failure, clears the count.
++ */
++#define LOGIN_SLOTS	64
++#define LOGIN_FREE	5
++#define LOGIN_MAX_WAIT	60
++#define LOGIN_FORGET	900
++
++struct login_slot {
++	struct uh_addr addr;
++	bool used;
++	unsigned int fails;
++	time_t last, until;
++};
++
++static struct login_slot login_slots[LOGIN_SLOTS];
++
++static time_t login_now(void)
++{
++	struct timespec ts;
++
++	clock_gettime(CLOCK_MONOTONIC, &ts);
++	return ts.tv_sec;
++}
++
++static bool login_addr_eq(const struct uh_addr *a, const struct uh_addr *b)
++{
++	if (a->family != b->family)
++		return false;
++
++	if (a->family == AF_INET6)
++		return !memcmp(&a->in6, &b->in6, sizeof(a->in6));
++
++	return a->in.s_addr == b->in.s_addr;
++}
++
++/* The address's slot; with create, the least recently failed one is recycled for it */
++static struct login_slot *login_slot(const struct uh_addr *addr, bool create)
++{
++	struct login_slot *s, *old = login_slots;
++
++	for (s = login_slots; s < login_slots + LOGIN_SLOTS; s++) {
++		if (s->used && login_addr_eq(&s->addr, addr))
++			goto found;
++		if (!s->used || (old->used && s->last < old->last))
++			old = s;
++	}
++
++	if (!create)
++		return NULL;
++
++	s = old;
++	memset(s, 0, sizeof(*s));
++	s->addr = *addr;
++	s->used = true;
++
++found:
++	if (login_now() - s->last > LOGIN_FORGET)
++		s->fails = 0;
++
++	return s;
++}
++
++static bool login_blocked(struct client *cl)
++{
++	struct login_slot *s = login_slot(&cl->peer_addr, false);
++
++	return s && s->fails > LOGIN_FREE && login_now() < s->until;
++}
++
++static void login_result(struct client *cl, int ret)
++{
++	struct login_slot *s;
++	unsigned int n;
++
++	if (ret == UBUS_STATUS_OK) {
++		s = login_slot(&cl->peer_addr, false);
++		if (s)
++			s->used = false;
++		return;
++	}
++
++	if (ret != UBUS_STATUS_PERMISSION_DENIED)
++		return;
++
++	s = login_slot(&cl->peer_addr, true);
++	s->last = login_now();
++	if (++s->fails <= LOGIN_FREE)
++		return;
++
++	n = s->fails - LOGIN_FREE;
++	s->until = s->last + (n >= 6 ? LOGIN_MAX_WAIT : min(1 << n, LOGIN_MAX_WAIT));
++}
++
++static bool login_call(struct dispatch_ubus *du)
++{
++	uint32_t id;
++
++	return !strcmp(du->func, "login") && !ubus_lookup_id(ctx, "session", &id) && id == du->obj;
++}
++
+ /* POST requests handling */
+ 
+ static void
+@@ -470,6 +578,11 @@
+ 
+ 	uloop_timeout_cancel(&du->timeout);
+ 
++	if (du->login) {
++		du->login = false;
++		login_result(cl, ret);
++	}
++
+ 	/* Legacy format always uses "result" array - even for errors and empty
+ 	 * results. */
+ 	if (du->legacy) {
+@@ -567,8 +680,13 @@
+ 	struct dispatch_ubus *du = &d->ubus;
+ 	struct blob_attr *cur;
+ 	static struct blob_buf req;
++	bool login = login_call(du);
+ 	int ret, rem;
+ 
++	du->login = false;
++	if (login && login_blocked(cl))
++		return uh_ubus_json_rpc_error(cl, ERROR_THROTTLED);
++
+ 	blob_buf_init(&req, 0);
+ 	blobmsg_for_each_attr(cur, args, rem) {
+ 		if (!strcmp(blobmsg_name(cur), "ubus_rpc_session"))
+@@ -592,6 +710,7 @@
+ 	uloop_timeout_set(&du->timeout, conf.script_timeout * 1000);
+ 
+ 	du->req_pending = true;
++	du->login = login;
+ }
+ 
+ static void uh_ubus_list_cb(struct ubus_context *ctx, struct ubus_object_data *obj, void *priv)
+diff -urN a/uhttpd.h b/uhttpd.h
+--- a/uhttpd.h	2026-10-17 11:23:45.901358324 -0500
++++ b/uhttpd.h	2026-10-17 11:23:45.917358347 -0500
+@@ -237,6 +237,7 @@
+ 	bool array;
+ 	int array_idx;
+ 	bool legacy; /* Got legacy request => use legacy reply */
++	bool login; /* session.login in flight: its result feeds the login throttle */
+ 
+ 	struct ubus_subscriber sub;
+ };

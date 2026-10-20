@@ -1,0 +1,31 @@
+/* Devices page. Shared helpers (chips, kv, swatch...) come from ../network/network.css. */
+.devices-page .dev-toolbar { gap: var(--sp-2); }
+.devices-page .search { position: relative; display: inline-flex; align-items: center; }
+.devices-page .search svg { position: absolute; left: 8px; color: var(--text-muted); pointer-events: none; }
+.devices-page .search .input { width: 200px; height: 24px; padding-left: 26px; }
+.devices-page .dev-banner { padding: var(--sp-2) var(--sp-3); border-bottom: 1px solid var(--border); }
+
+.devices-page .devtable .grouprow td { height: 30px; background: var(--surface-2); border-bottom: 1px solid var(--border); font-size: var(--fs-sm); }
+.devices-page .devtable tbody + tbody .grouprow td { border-top: 1px solid var(--border-strong); }
+.devices-page .devtable tr.offline td { color: var(--text-secondary); }
+.devices-page .devtable .actions { justify-content: flex-end; gap: 2px; }
+.devices-page .devtable .actions .btn { height: 22px; padding: 0 6px; font-size: var(--fs-sm); }
+.devices-page .devtable .actions .btn.icon { width: 22px; padding: 0; }
+.devices-page .devtable .actions .btn:not(:hover) { color: var(--text-secondary); }
+
+.devices-page .net-pool { padding: var(--sp-3) var(--sp-4) var(--sp-2); border-bottom: 1px solid var(--border); }
+.devices-page .net-card.dhcp-off .net-pool { padding-top: var(--sp-2); }
+.devices-page .net-name { font-weight: 600; color: var(--text-primary); text-transform: none; letter-spacing: 0; }
+.devices-page .v6-line { gap: 4px; margin-top: 2px; }
+.devices-page .v6-line .btn { height: 20px; padding: 0 4px; font-size: var(--fs-xs); }
+.devices-page .v6-line .btn:not(:hover) { color: var(--text-muted); }
+.devices-page > .dev-toolbar { flex-wrap: wrap; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.devices-page .table-wrap { overflow-x: auto; }
+/* one column grid for every network's table, so they line up */
+.devices-page .devtable { table-layout: fixed; width: 100%; }
+.devices-page .devtable .c-status { width: 92px; }
+.devices-page .devtable .c-addr { width: 230px; }
+.devices-page .devtable .c-lease { width: 84px; }
+.devices-page .devtable .c-act { width: 64px; }
+.devices-page .devtable td { overflow: hidden; text-overflow: ellipsis; }

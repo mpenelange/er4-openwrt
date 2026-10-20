@@ -1,0 +1,17 @@
+# OpenWrt's packet steering pins each port's RPS to one CPU, which funnels the Octeon
+# driver's 4-core receive onto a single core (seen as rx drops and pauses under load)
+uci -q get network.globals >/dev/null || uci set network.globals=globals
+uci set network.globals.packet_steering=0
+
+# config_generate always wraps "lan" in br-lan, even for one port (board.d asks for plain
+# eth1). A CPU bridge is slow and stalls offload, so put lan back on eth1 and drop the
+# bridge, but only while it's still the generated one-port bridge.
+if [ "$(uci -q get network.lan.device)" = "br-lan" ]; then
+	for s in $(uci -q show network | sed -n "s/^network\.\([^.]*\)\.name='br-lan'$/\1/p"); do
+		[ "$(uci -q get network.$s.ports)" = "eth1" ] || continue
+		uci delete network.$s
+		uci set network.lan.device=eth1
+	done
+fi
+uci commit network
+exit 0

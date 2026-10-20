@@ -1,0 +1,7 @@
+# dnsmasq's localservice answers only directly attached subnets, so VPN clients (the IPsec road
+# warrior pool, site-to-site and Tailscale peers: routed, not attached) were ignored while the UI
+# hands them the router as their DNS server. The firewall zones decide instead, and the WAN is
+# refused before any user rule (chain-pre/input_wan/10-er4-mgmt.nft).
+uci -q set dhcp.@dnsmasq[0].localservice=0
+uci commit dhcp
+exit 0

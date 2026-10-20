@@ -1,0 +1,21 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{sh,py,ts,tsx,js,json,css,md,yml,uc}]
+indent_style = space
+
+[*.{c,h}]
+indent_style = tab
+
+[{Makefile,*.mk}]
+indent_style = tab
+
+# Patch series and imported files: as they are
+[{patches/**,reference/**,modules/ipfwd/**}]
+trim_trailing_whitespace = false
+indent_style = unset

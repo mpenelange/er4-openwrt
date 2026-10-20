@@ -1,0 +1,583 @@
+From 885c716e71b326aa1569764fb57d40ec7020b561 Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 23:26:18 -0500
+Subject: [PATCH 09/10] MIPS: Octeon: AES (ecb, cbc, ctr) and GHASH on the crypto unit
+
+Register aes, ecb(aes), cbc(aes), ctr(aes) and ghash backed by the OCTEON
+COP2 AES unit and Galois field multiplier, so the kernel's gcm/rfc4106
+and authenc templates (IPsec ESP) run on hardware. Modelled on the COP2
+usage in Cavium's cavium_ipsec_kame; correctness is left to the crypto
+self-tests (an implementation that fails them is not used).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/mips/cavium-octeon/crypto/Makefile       |   2 +
+ arch/mips/cavium-octeon/crypto/octeon-aes.c   | 348 ++++++++++++++++++
+ arch/mips/cavium-octeon/crypto/octeon-ghash.c | 159 ++++++++
+ crypto/Kconfig                                |  19 +
+ 4 files changed, 528 insertions(+)
+ create mode 100644 arch/mips/cavium-octeon/crypto/octeon-aes.c
+ create mode 100644 arch/mips/cavium-octeon/crypto/octeon-ghash.c
+
+diff --git a/arch/mips/cavium-octeon/crypto/Makefile b/arch/mips/cavium-octeon/crypto/Makefile
+index db26c73fa..b856a3748 100644
+--- a/arch/mips/cavium-octeon/crypto/Makefile
++++ b/arch/mips/cavium-octeon/crypto/Makefile
+@@ -9,3 +9,5 @@ obj-$(CONFIG_CRYPTO_MD5_OCTEON)		+= octeon-md5.o
+ obj-$(CONFIG_CRYPTO_SHA1_OCTEON)	+= octeon-sha1.o
+ obj-$(CONFIG_CRYPTO_SHA256_OCTEON)	+= octeon-sha256.o
+ obj-$(CONFIG_CRYPTO_SHA512_OCTEON)	+= octeon-sha512.o
++obj-$(CONFIG_CRYPTO_AES_OCTEON)		+= octeon-aes.o
++obj-$(CONFIG_CRYPTO_GHASH_OCTEON)	+= octeon-ghash.o
+diff --git a/arch/mips/cavium-octeon/crypto/octeon-aes.c b/arch/mips/cavium-octeon/crypto/octeon-aes.c
+new file mode 100644
+index 000000000..1dfb82d62
+--- /dev/null
++++ b/arch/mips/cavium-octeon/crypto/octeon-aes.c
+@@ -0,0 +1,348 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * AES (aes, ecb, cbc, ctr) on the OCTEON crypto unit (COP2).
++ *
++ * The unit takes the raw key and expands it itself; data goes in and out as
++ * two big-endian 64-bit words per block, which on this big-endian CPU is
++ * simply the block's bytes. COP2 state is only valid between
++ * octeon_crypto_enable() and _disable() (preemption off), so every walk step
++ * loads the key again. gcm(aes) and rfc4106(gcm(aes)) for IPsec are built by
++ * the kernel's templates on top of ctr(aes) here and ghash (octeon-ghash.c).
++ *
++ * Based on the COP2 usage in Cavium's cavium_ipsec_kame (GPL, Ubiquiti's
++ * EdgeOS GPL archive).
++ */
++
++#include <crypto/aes.h>
++#include <crypto/algapi.h>
++#include <crypto/internal/skcipher.h>
++#include <linux/module.h>
++#include <asm/unaligned.h>
++#include <asm/octeon/octeon.h>
++
++#include "octeon-crypto.h"
++
++/* COP2 AES registers (as in asm/octeon/cvmx-asm.h) */
++#define MT_AES_KEY(v, i)	asm volatile("dmtc2 %[rt],0x0104+" STR(i) : : [rt] "d" (v))
++#define MT_AES_KEYLENGTH(v)	asm volatile("dmtc2 %[rt],0x0110" : : [rt] "d" (v))
++#define MT_AES_IV(v, i)		asm volatile("dmtc2 %[rt],0x0102+" STR(i) : : [rt] "d" (v))
++#define MT_AES_ENC0(v)		asm volatile("dmtc2 %[rt],0x010a" : : [rt] "d" (v))
++#define MT_AES_ENC1(v)		asm volatile("dmtc2 %[rt],0x310b" : : [rt] "d" (v))
++#define MT_AES_DEC0(v)		asm volatile("dmtc2 %[rt],0x010e" : : [rt] "d" (v))
++#define MT_AES_DEC1(v)		asm volatile("dmtc2 %[rt],0x310f" : : [rt] "d" (v))
++#define MT_AES_ENC_CBC0(v)	asm volatile("dmtc2 %[rt],0x0108" : : [rt] "d" (v))
++#define MT_AES_ENC_CBC1(v)	asm volatile("dmtc2 %[rt],0x3109" : : [rt] "d" (v))
++#define MT_AES_DEC_CBC0(v)	asm volatile("dmtc2 %[rt],0x010c" : : [rt] "d" (v))
++#define MT_AES_DEC_CBC1(v)	asm volatile("dmtc2 %[rt],0x310d" : : [rt] "d" (v))
++#define MF_AES_RESULT(v, i)	asm volatile("dmfc2 %[rt],0x0100+" STR(i) : [rt] "=d" (v) : )
++
++struct octeon_aes_ctx {
++	u64 key[4];		/* zero-padded to 256 bits */
++	unsigned int len;	/* bytes: 16, 24, 32 */
++};
++
++static int octeon_aes_setkey(struct octeon_aes_ctx *ctx, const u8 *key, unsigned int len)
++{
++	if (len != AES_KEYSIZE_128 && len != AES_KEYSIZE_192 && len != AES_KEYSIZE_256)
++		return -EINVAL;
++	memset(ctx->key, 0, sizeof(ctx->key));
++	memcpy(ctx->key, key, len);
++	ctx->len = len;
++	return 0;
++}
++
++static inline void octeon_aes_load_key(const struct octeon_aes_ctx *ctx)
++{
++	MT_AES_KEY(ctx->key[0], 0);
++	MT_AES_KEY(ctx->key[1], 1);
++	MT_AES_KEY(ctx->key[2], 2);
++	MT_AES_KEY(ctx->key[3], 3);
++	MT_AES_KEYLENGTH(ctx->len / 8 - 1);
++}
++
++#define LD(p, i)	get_unaligned((const u64 *)(p) + (i))
++#define ST(p, i, v)	put_unaligned((v), (u64 *)(p) + (i))
++
++/* ---- single block cipher ("aes") ------------------------------------------ */
++static int octeon_aes_cipher_setkey(struct crypto_tfm *tfm, const u8 *key, unsigned int len)
++{
++	return octeon_aes_setkey(crypto_tfm_ctx(tfm), key, len);
++}
++
++static void octeon_aes_encrypt_one(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
++{
++	struct octeon_aes_ctx *ctx = crypto_tfm_ctx(tfm);
++	struct octeon_cop2_state state;
++	unsigned long flags;
++	u64 o0, o1;
++
++	flags = octeon_crypto_enable(&state);
++	octeon_aes_load_key(ctx);
++	MT_AES_ENC0(LD(src, 0));
++	MT_AES_ENC1(LD(src, 1));
++	MF_AES_RESULT(o0, 0);
++	MF_AES_RESULT(o1, 1);
++	octeon_crypto_disable(&state, flags);
++	ST(dst, 0, o0);
++	ST(dst, 1, o1);
++}
++
++static void octeon_aes_decrypt_one(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
++{
++	struct octeon_aes_ctx *ctx = crypto_tfm_ctx(tfm);
++	struct octeon_cop2_state state;
++	unsigned long flags;
++	u64 o0, o1;
++
++	flags = octeon_crypto_enable(&state);
++	octeon_aes_load_key(ctx);
++	MT_AES_DEC0(LD(src, 0));
++	MT_AES_DEC1(LD(src, 1));
++	MF_AES_RESULT(o0, 0);
++	MF_AES_RESULT(o1, 1);
++	octeon_crypto_disable(&state, flags);
++	ST(dst, 0, o0);
++	ST(dst, 1, o1);
++}
++
++/* ---- ecb / cbc / ctr ------------------------------------------------------------- */
++static int octeon_aes_skcipher_setkey(struct crypto_skcipher *tfm, const u8 *key, unsigned int len)
++{
++	return octeon_aes_setkey(crypto_skcipher_ctx(tfm), key, len);
++}
++
++static int octeon_aes_ecb(struct skcipher_request *req, bool enc)
++{
++	const struct octeon_aes_ctx *ctx = crypto_skcipher_ctx(crypto_skcipher_reqtfm(req));
++	struct octeon_cop2_state state;
++	struct skcipher_walk walk;
++	unsigned long flags;
++	unsigned int n;
++	int err;
++
++	err = skcipher_walk_virt(&walk, req, false);
++	while ((n = walk.nbytes) >= AES_BLOCK_SIZE) {
++		const u8 *src = walk.src.virt.addr;
++		u8 *dst = walk.dst.virt.addr;
++		unsigned int i, blocks = n / AES_BLOCK_SIZE;
++		u64 o0, o1;
++
++		flags = octeon_crypto_enable(&state);
++		octeon_aes_load_key(ctx);
++		for (i = 0; i < blocks; i++, src += AES_BLOCK_SIZE, dst += AES_BLOCK_SIZE) {
++			if (enc) {
++				MT_AES_ENC0(LD(src, 0));
++				MT_AES_ENC1(LD(src, 1));
++			} else {
++				MT_AES_DEC0(LD(src, 0));
++				MT_AES_DEC1(LD(src, 1));
++			}
++			MF_AES_RESULT(o0, 0);
++			MF_AES_RESULT(o1, 1);
++			ST(dst, 0, o0);
++			ST(dst, 1, o1);
++		}
++		octeon_crypto_disable(&state, flags);
++		err = skcipher_walk_done(&walk, n % AES_BLOCK_SIZE);
++	}
++	return err;
++}
++
++static int octeon_aes_ecb_encrypt(struct skcipher_request *req) { return octeon_aes_ecb(req, true); }
++static int octeon_aes_ecb_decrypt(struct skcipher_request *req) { return octeon_aes_ecb(req, false); }
++
++/*
++ * CBC: the unit chains through its IV registers. The next IV is kept in
++ * software as well (last ciphertext block), so each walk step starts clean.
++ */
++static int octeon_aes_cbc(struct skcipher_request *req, bool enc)
++{
++	const struct octeon_aes_ctx *ctx = crypto_skcipher_ctx(crypto_skcipher_reqtfm(req));
++	struct octeon_cop2_state state;
++	struct skcipher_walk walk;
++	unsigned long flags;
++	unsigned int n;
++	int err;
++
++	err = skcipher_walk_virt(&walk, req, false);
++	while ((n = walk.nbytes) >= AES_BLOCK_SIZE) {
++		const u8 *src = walk.src.virt.addr;
++		u8 *dst = walk.dst.virt.addr;
++		unsigned int i, blocks = n / AES_BLOCK_SIZE;
++		u64 o0 = 0, o1 = 0, c0 = 0, c1 = 0;
++
++		flags = octeon_crypto_enable(&state);
++		octeon_aes_load_key(ctx);
++		MT_AES_IV(LD(walk.iv, 0), 0);
++		MT_AES_IV(LD(walk.iv, 1), 1);
++		for (i = 0; i < blocks; i++, src += AES_BLOCK_SIZE, dst += AES_BLOCK_SIZE) {
++			c0 = LD(src, 0);
++			c1 = LD(src, 1);
++			if (enc) {
++				MT_AES_ENC_CBC0(c0);
++				MT_AES_ENC_CBC1(c1);
++			} else {
++				MT_AES_DEC_CBC0(c0);
++				MT_AES_DEC_CBC1(c1);
++			}
++			MF_AES_RESULT(o0, 0);
++			MF_AES_RESULT(o1, 1);
++			ST(dst, 0, o0);
++			ST(dst, 1, o1);
++		}
++		octeon_crypto_disable(&state, flags);
++		/* next IV: the last ciphertext block (output when encrypting, input when decrypting) */
++		ST(walk.iv, 0, enc ? o0 : c0);
++		ST(walk.iv, 1, enc ? o1 : c1);
++		err = skcipher_walk_done(&walk, n % AES_BLOCK_SIZE);
++	}
++	return err;
++}
++
++static int octeon_aes_cbc_encrypt(struct skcipher_request *req) { return octeon_aes_cbc(req, true); }
++static int octeon_aes_cbc_decrypt(struct skcipher_request *req) { return octeon_aes_cbc(req, false); }
++
++/* CTR: the unit has no counter mode; encrypt the 128-bit big-endian counter block per block. */
++static int octeon_aes_ctr(struct skcipher_request *req)
++{
++	const struct octeon_aes_ctx *ctx = crypto_skcipher_ctx(crypto_skcipher_reqtfm(req));
++	struct octeon_cop2_state state;
++	struct skcipher_walk walk;
++	unsigned long flags;
++	unsigned int n;
++	u64 k0, k1, ctr0, ctr1;
++	int err;
++
++	err = skcipher_walk_virt(&walk, req, false);
++	while ((n = walk.nbytes) > 0) {
++		const u8 *src = walk.src.virt.addr;
++		u8 *dst = walk.dst.virt.addr;
++		/* full blocks, plus the tail only on the walk's last step */
++		unsigned int todo = n == walk.total ? n : round_down(n, AES_BLOCK_SIZE);
++
++		ctr0 = LD(walk.iv, 0);
++		ctr1 = LD(walk.iv, 1);
++		flags = octeon_crypto_enable(&state);
++		octeon_aes_load_key(ctx);
++		while (todo) {
++			unsigned int len = min_t(unsigned int, todo, AES_BLOCK_SIZE);
++
++			MT_AES_ENC0(ctr0);
++			MT_AES_ENC1(ctr1);
++			MF_AES_RESULT(k0, 0);
++			MF_AES_RESULT(k1, 1);
++			if (++ctr1 == 0)
++				ctr0++;
++			if (len == AES_BLOCK_SIZE) {
++				ST(dst, 0, LD(src, 0) ^ k0);
++				ST(dst, 1, LD(src, 1) ^ k1);
++			} else {
++				u8 ks[AES_BLOCK_SIZE];
++
++				ST(ks, 0, k0);
++				ST(ks, 1, k1);
++				crypto_xor_cpy(dst, src, ks, len);
++				memzero_explicit(ks, sizeof(ks));
++			}
++			src += len;
++			dst += len;
++			todo -= len;
++			n -= len;
++		}
++		octeon_crypto_disable(&state, flags);
++		ST(walk.iv, 0, ctr0);
++		ST(walk.iv, 1, ctr1);
++		err = skcipher_walk_done(&walk, n);
++	}
++	return err;
++}
++
++static struct crypto_alg octeon_aes_cipher = {
++	.cra_name		= "aes",
++	.cra_driver_name	= "aes-octeon",
++	.cra_priority		= OCTEON_CR_OPCODE_PRIORITY,
++	.cra_flags		= CRYPTO_ALG_TYPE_CIPHER,
++	.cra_blocksize		= AES_BLOCK_SIZE,
++	.cra_ctxsize		= sizeof(struct octeon_aes_ctx),
++	.cra_module		= THIS_MODULE,
++	.cra_u.cipher = {
++		.cia_min_keysize	= AES_MIN_KEY_SIZE,
++		.cia_max_keysize	= AES_MAX_KEY_SIZE,
++		.cia_setkey		= octeon_aes_cipher_setkey,
++		.cia_encrypt		= octeon_aes_encrypt_one,
++		.cia_decrypt		= octeon_aes_decrypt_one,
++	},
++};
++
++static struct skcipher_alg octeon_aes_skciphers[] = { {
++	.base.cra_name		= "ecb(aes)",
++	.base.cra_driver_name	= "ecb-aes-octeon",
++	.base.cra_priority	= OCTEON_CR_OPCODE_PRIORITY,
++	.base.cra_blocksize	= AES_BLOCK_SIZE,
++	.base.cra_ctxsize	= sizeof(struct octeon_aes_ctx),
++	.base.cra_module	= THIS_MODULE,
++	.min_keysize		= AES_MIN_KEY_SIZE,
++	.max_keysize		= AES_MAX_KEY_SIZE,
++	.setkey			= octeon_aes_skcipher_setkey,
++	.encrypt		= octeon_aes_ecb_encrypt,
++	.decrypt		= octeon_aes_ecb_decrypt,
++}, {
++	.base.cra_name		= "cbc(aes)",
++	.base.cra_driver_name	= "cbc-aes-octeon",
++	.base.cra_priority	= OCTEON_CR_OPCODE_PRIORITY,
++	.base.cra_blocksize	= AES_BLOCK_SIZE,
++	.base.cra_ctxsize	= sizeof(struct octeon_aes_ctx),
++	.base.cra_module	= THIS_MODULE,
++	.min_keysize		= AES_MIN_KEY_SIZE,
++	.max_keysize		= AES_MAX_KEY_SIZE,
++	.ivsize			= AES_BLOCK_SIZE,
++	.setkey			= octeon_aes_skcipher_setkey,
++	.encrypt		= octeon_aes_cbc_encrypt,
++	.decrypt		= octeon_aes_cbc_decrypt,
++}, {
++	.base.cra_name		= "ctr(aes)",
++	.base.cra_driver_name	= "ctr-aes-octeon",
++	.base.cra_priority	= OCTEON_CR_OPCODE_PRIORITY,
++	.base.cra_blocksize	= 1,
++	.base.cra_ctxsize	= sizeof(struct octeon_aes_ctx),
++	.base.cra_module	= THIS_MODULE,
++	.min_keysize		= AES_MIN_KEY_SIZE,
++	.max_keysize		= AES_MAX_KEY_SIZE,
++	.ivsize			= AES_BLOCK_SIZE,
++	.chunksize		= AES_BLOCK_SIZE,
++	.setkey			= octeon_aes_skcipher_setkey,
++	.encrypt		= octeon_aes_ctr,
++	.decrypt		= octeon_aes_ctr,
++} };
++
++static int __init octeon_aes_mod_init(void)
++{
++	int err;
++
++	if (!octeon_has_crypto())
++		return -ENOTSUPP;
++	err = crypto_register_alg(&octeon_aes_cipher);
++	if (err)
++		return err;
++	err = crypto_register_skciphers(octeon_aes_skciphers, ARRAY_SIZE(octeon_aes_skciphers));
++	if (err)
++		crypto_unregister_alg(&octeon_aes_cipher);
++	return err;
++}
++
++static void __exit octeon_aes_mod_fini(void)
++{
++	crypto_unregister_skciphers(octeon_aes_skciphers, ARRAY_SIZE(octeon_aes_skciphers));
++	crypto_unregister_alg(&octeon_aes_cipher);
++}
++
++module_init(octeon_aes_mod_init);
++module_exit(octeon_aes_mod_fini);
++
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("AES (ecb, cbc, ctr) on the OCTEON crypto unit");
++MODULE_ALIAS_CRYPTO("aes");
++MODULE_ALIAS_CRYPTO("aes-octeon");
++MODULE_ALIAS_CRYPTO("ecb(aes)");
++MODULE_ALIAS_CRYPTO("cbc(aes)");
++MODULE_ALIAS_CRYPTO("ctr(aes)");
+diff --git a/arch/mips/cavium-octeon/crypto/octeon-ghash.c b/arch/mips/cavium-octeon/crypto/octeon-ghash.c
+new file mode 100644
+index 000000000..d40704adc
+--- /dev/null
++++ b/arch/mips/cavium-octeon/crypto/octeon-ghash.c
+@@ -0,0 +1,159 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * GHASH (the GCM hash) on the OCTEON crypto unit's Galois field multiplier.
++ *
++ * The multiplier is loaded with H and the GCM polynomial (0xe100 as the
++ * unit's "poly" register wants it); each 16-byte block is XORed into the
++ * running value and multiplied by H (XOR0 then XORMUL1), all in GCM's own
++ * bit order, so blocks go in as plain big-endian words. The crypto
++ * self-tests decide whether this is used: if it fails them, gcm(aes) keeps
++ * the generic ghash and still gets the hardware AES (octeon-aes.c).
++ */
++
++#include <crypto/ghash.h>
++#include <crypto/internal/hash.h>
++#include <linux/module.h>
++#include <asm/unaligned.h>
++#include <asm/octeon/octeon.h>
++
++#include "octeon-crypto.h"
++
++#define MT_GFM_MUL(v, i)	asm volatile("dmtc2 %[rt],0x0258+" STR(i) : : [rt] "d" (v))
++#define MT_GFM_POLY(v)		asm volatile("dmtc2 %[rt],0x025e" : : [rt] "d" (v))
++#define MT_GFM_RESINP(v, i)	asm volatile("dmtc2 %[rt],0x025a+" STR(i) : : [rt] "d" (v))
++#define MT_GFM_XOR0(v)		asm volatile("dmtc2 %[rt],0x025c" : : [rt] "d" (v))
++#define MT_GFM_XORMUL1(v)	asm volatile("dmtc2 %[rt],0x425d" : : [rt] "d" (v))
++#define MF_GFM_RESINP(v, i)	asm volatile("dmfc2 %[rt],0x025a+" STR(i) : [rt] "=d" (v) : )
++
++struct octeon_ghash_key {
++	u64 h[2];
++};
++
++struct octeon_ghash_desc {
++	u64 y[2];			/* running hash */
++	u8 buf[GHASH_BLOCK_SIZE];	/* pending partial block */
++	unsigned int count;		/* bytes in buf */
++};
++
++static int octeon_ghash_setkey(struct crypto_shash *tfm, const u8 *key, unsigned int len)
++{
++	struct octeon_ghash_key *k = crypto_shash_ctx(tfm);
++
++	if (len != GHASH_BLOCK_SIZE)
++		return -EINVAL;
++	k->h[0] = get_unaligned_be64(key);
++	k->h[1] = get_unaligned_be64(key + 8);
++	return 0;
++}
++
++static int octeon_ghash_init(struct shash_desc *desc)
++{
++	memset(shash_desc_ctx(desc), 0, sizeof(struct octeon_ghash_desc));
++	return 0;
++}
++
++/* y = (y ^ block) * H for each whole block of src */
++static void octeon_ghash_blocks(const struct octeon_ghash_key *k, u64 y[2], const u8 *src, unsigned int blocks)
++{
++	struct octeon_cop2_state state;
++	unsigned long flags;
++
++	flags = octeon_crypto_enable(&state);
++	MT_GFM_POLY(0xe100);
++	MT_GFM_MUL(k->h[0], 0);
++	MT_GFM_MUL(k->h[1], 1);
++	MT_GFM_RESINP(y[0], 0);
++	MT_GFM_RESINP(y[1], 1);
++	while (blocks--) {
++		MT_GFM_XOR0(get_unaligned_be64(src));
++		MT_GFM_XORMUL1(get_unaligned_be64(src + 8));
++		src += GHASH_BLOCK_SIZE;
++	}
++	MF_GFM_RESINP(y[0], 0);
++	MF_GFM_RESINP(y[1], 1);
++	octeon_crypto_disable(&state, flags);
++}
++
++static int octeon_ghash_update(struct shash_desc *desc, const u8 *src, unsigned int len)
++{
++	const struct octeon_ghash_key *k = crypto_shash_ctx(desc->tfm);
++	struct octeon_ghash_desc *d = shash_desc_ctx(desc);
++
++	if (d->count) {
++		unsigned int n = min(len, GHASH_BLOCK_SIZE - d->count);
++
++		memcpy(d->buf + d->count, src, n);
++		d->count += n;
++		src += n;
++		len -= n;
++		if (d->count < GHASH_BLOCK_SIZE)
++			return 0;
++		octeon_ghash_blocks(k, d->y, d->buf, 1);
++		d->count = 0;
++	}
++	if (len >= GHASH_BLOCK_SIZE) {
++		unsigned int blocks = len / GHASH_BLOCK_SIZE;
++
++		octeon_ghash_blocks(k, d->y, src, blocks);
++		src += blocks * GHASH_BLOCK_SIZE;
++		len -= blocks * GHASH_BLOCK_SIZE;
++	}
++	if (len) {
++		memcpy(d->buf, src, len);
++		d->count = len;
++	}
++	return 0;
++}
++
++static int octeon_ghash_final(struct shash_desc *desc, u8 *dst)
++{
++	const struct octeon_ghash_key *k = crypto_shash_ctx(desc->tfm);
++	struct octeon_ghash_desc *d = shash_desc_ctx(desc);
++
++	/* a partial last block is zero-padded, as in ghash-generic */
++	if (d->count) {
++		memset(d->buf + d->count, 0, GHASH_BLOCK_SIZE - d->count);
++		octeon_ghash_blocks(k, d->y, d->buf, 1);
++	}
++	put_unaligned_be64(d->y[0], dst);
++	put_unaligned_be64(d->y[1], dst + 8);
++	memzero_explicit(d, sizeof(*d));
++	return 0;
++}
++
++static struct shash_alg octeon_ghash_alg = {
++	.digestsize	= GHASH_DIGEST_SIZE,
++	.init		= octeon_ghash_init,
++	.update		= octeon_ghash_update,
++	.final		= octeon_ghash_final,
++	.setkey		= octeon_ghash_setkey,
++	.descsize	= sizeof(struct octeon_ghash_desc),
++	.base		= {
++		.cra_name		= "ghash",
++		.cra_driver_name	= "ghash-octeon",
++		.cra_priority		= OCTEON_CR_OPCODE_PRIORITY,
++		.cra_blocksize		= GHASH_BLOCK_SIZE,
++		.cra_ctxsize		= sizeof(struct octeon_ghash_key),
++		.cra_module		= THIS_MODULE,
++	},
++};
++
++static int __init octeon_ghash_mod_init(void)
++{
++	if (!octeon_has_crypto())
++		return -ENOTSUPP;
++	return crypto_register_shash(&octeon_ghash_alg);
++}
++
++static void __exit octeon_ghash_mod_fini(void)
++{
++	crypto_unregister_shash(&octeon_ghash_alg);
++}
++
++module_init(octeon_ghash_mod_init);
++module_exit(octeon_ghash_mod_fini);
++
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("GHASH on the OCTEON crypto unit");
++MODULE_ALIAS_CRYPTO("ghash");
++MODULE_ALIAS_CRYPTO("ghash-octeon");
+diff --git a/crypto/Kconfig b/crypto/Kconfig
+index 877cdf91d..968738cd4 100644
+--- a/crypto/Kconfig
++++ b/crypto/Kconfig
+@@ -957,6 +957,25 @@ config CRYPTO_SHA256_OCTEON
+ 	  SHA-256 secure hash standard (DFIPS 180-2) implemented
+ 	  using OCTEON crypto instructions, when available.
+ 
++config CRYPTO_AES_OCTEON
++	tristate "AES cipher with ECB, CBC and CTR modes (OCTEON)"
++	depends on CPU_CAVIUM_OCTEON
++	select CRYPTO_ALGAPI
++	select CRYPTO_SKCIPHER
++	select CRYPTO_LIB_AES
++	help
++	  AES in ECB, CBC and CTR modes using the OCTEON crypto unit
++	  (COP2), when available. gcm(aes) and IPsec ESP use it through
++	  the kernel's templates.
++
++config CRYPTO_GHASH_OCTEON
++	tristate "GHASH hash function (OCTEON)"
++	depends on CPU_CAVIUM_OCTEON
++	select CRYPTO_HASH
++	help
++	  GHASH, the authentication part of GCM, using the OCTEON
++	  crypto unit's Galois field multiplier, when available.
++
+ config CRYPTO_SHA256_SPARC64
+ 	tristate "SHA224 and SHA256 digest algorithm (SPARC64)"
+ 	depends on SPARC64
+-- 
+2.47.3
+

@@ -1,0 +1,65 @@
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Subject: jail: hold signals until the handlers are installed
+
+procd signals an instance right after (re)starting it on a reload (dnsmasq's
+reload_service: start_service, then procd_send_signal). ujail installs its
+handlers only in signals_init(), after option and OCI parsing, so a SIGHUP in
+that window killed it with the default action; procd counted a crash and,
+after five within the hour, stopped respawning: dnsmasq stayed down, and with
+it DNS and DHCP for every network. Seen on the ER-4 (1 GHz MIPS) whenever
+a new network was applied.
+
+Most of the window is before main() even runs (the dynamic loader on a slow
+CPU), so procd starts a jailed instance with all signals blocked (the mask
+survives execve), ujail also blocks them first thing in main() for other
+callers, and signals_init() unblocks them once the handlers are in place,
+before any process is spawned (the jailed process inherits the mask). A
+signal that arrives before the jailed process runs is dropped, as it already
+was between signals_init() and the spawn.
+
+--- a/jail/jail.c	2026-10-17 17:58:08.271284563 -0500
++++ b/jail/jail.c	2026-10-17 17:58:08.283284558 -0500
+@@ -1159,6 +1159,10 @@
+ 		s.sa_handler = jail_handle_signal;
+ 		sigaction(i, &s, NULL);
+ 	}
++	/* handlers are in place: deliver what main() held back (forwarded, or dropped while
++	 * nothing runs yet), and don't hand a blocked mask to the jailed process */
++	sigemptyset(&sigmask);
++	sigprocmask(SIG_SETMASK, &sigmask, NULL);
+ }
+ 
+ static void pre_exec_jail(struct uloop_timeout *t);
+@@ -2601,6 +2605,13 @@
+ 	struct list_head envl = LIST_HEAD_INIT(envl);
+ 	struct env_e *enve, *tmpenve;
+ 	unsigned short int envn = 0, envc = 0;
++	sigset_t allsig;
++
++	/* until signals_init(), a signal would take its default action: a reload's SIGHUP from
++	 * procd right after it (re)started the instance killed ujail, procd counted a crash, and
++	 * after five it stopped respawning (dnsmasq, i.e. DNS and DHCP, stayed down) */
++	sigfillset(&allsig);
++	sigprocmask(SIG_BLOCK, &allsig, NULL);
+ 
+ 	if (uid) {
+ 		ERROR("not root, aborting: %m\n");
+--- a/service/instance.c	2026-10-17 18:05:45.155335952 -0500
++++ b/service/instance.c	2026-10-17 18:05:45.167335958 -0500
+@@ -556,6 +556,16 @@
+ 		exit(127);
+ 	}
+ 
++	/* ujail installs its signal handlers only after loading and parsing, and procd signals
++	 * an instance right after starting it (a reload's SIGHUP): start ujail with signals held,
++	 * it releases them once its handlers are in (jail.c signals_init) */
++	if (in->has_jail) {
++		sigset_t all;
++
++		sigfillset(&all);
++		sigprocmask(SIG_BLOCK, &all, NULL);
++	}
++
+ 	execvp(argv[0], argv);
+ 	exit(127);
+ }

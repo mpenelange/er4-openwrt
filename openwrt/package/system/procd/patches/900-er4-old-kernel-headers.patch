@@ -1,0 +1,19 @@
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Subject: jail: build against kernel headers older than 5.19
+
+The ER-4 target builds its toolchain against UEK7 (5.15) headers, which
+don't define AUDIT_ARCH_LOONGARCH64 (added in 5.19).
+
+--- a/jail/seccomp-oci.c	2026-10-12 17:14:53.757506848 +0000
++++ b/jail/seccomp-oci.c	2026-10-12 17:14:53.769506859 +0000
+@@ -119,8 +119,10 @@
+ 		return AUDIT_ARCH_ARM;
+ 	else if (!strcmp(archname, "SCMP_ARCH_AARCH64"))
+ 		return AUDIT_ARCH_AARCH64;
++#ifdef AUDIT_ARCH_LOONGARCH64
+ 	else if (!strcmp(archname, "SCMP_ARCH_LOONGARCH64"))
+ 		return AUDIT_ARCH_LOONGARCH64;
++#endif
+ 	else if (!strcmp(archname, "SCMP_ARCH_MIPS"))
+ 		return AUDIT_ARCH_MIPS;
+ 	else if (!strcmp(archname, "SCMP_ARCH_MIPS64"))

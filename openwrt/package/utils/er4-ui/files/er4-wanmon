@@ -1,0 +1,22 @@
+#!/bin/sh
+# WAN health sampler for the ER-4 web UI: every 10 s, one ping to the default gateway and one
+# to an internet address; "time gw_rtt inet_rtt" per line ("-" = no reply) in /tmp, last 24 h.
+# Read by er4.wan_health. Started by /etc/init.d/er4-wanmon (procd respawns it).
+OUT=/tmp/er4-wan.tsv
+TARGET=${1:-1.1.1.1}
+KEEP=8640
+rtt() { ping -c 1 -W 1 "$1" 2>/dev/null | sed -n 's/.*time=\([0-9.]*\) ms.*/\1/p' | head -n 1; }
+n=0
+while :; do
+	gw=$(ip -4 route show default 2>/dev/null | sed -n 's/^default via \([0-9.]*\).*/\1/p' | head -n 1)
+	a=-; b=-
+	[ -n "$gw" ] && a=$(rtt "$gw") && [ -n "$a" ] || a=-
+	b=$(rtt "$TARGET"); [ -n "$b" ] || b=-
+	echo "$(date +%s) $a $b" >> "$OUT"
+	n=$((n + 1))
+	if [ $n -ge 60 ]; then
+		n=0
+		tail -n $KEEP "$OUT" > "$OUT.tmp" && mv "$OUT.tmp" "$OUT"
+	fi
+	sleep 10
+done

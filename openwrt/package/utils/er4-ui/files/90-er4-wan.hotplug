@@ -1,0 +1,7 @@
+# WAN up/down events for the web UI's WAN health (er4.wan_health); /tmp, last 500
+case "$ACTION" in ifup|ifdown|ifup-failed) ;; *) exit 0 ;; esac
+case "$INTERFACE" in loopback|lan) exit 0 ;; esac
+f=/tmp/er4-wan-events
+echo "$(date +%s) $ACTION $INTERFACE" >> $f
+[ "$(wc -l < $f)" -gt 500 ] && { tail -n 500 $f > $f.tmp && mv $f.tmp $f; }
+exit 0

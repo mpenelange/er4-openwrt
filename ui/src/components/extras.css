@@ -1,0 +1,56 @@
+/* Styles for the interaction components in tabs/tooltip/chips/copy/qr/sortable/device-picker.tsx */
+
+/* ---- tabs (sub-routes) ---- */
+.tabs { display: flex; gap: var(--sp-1); border-bottom: 1px solid var(--border); }
+.tabs a { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 var(--sp-3); margin-bottom: -1px; color: var(--text-secondary); border-bottom: 2px solid transparent; font-weight: 550; }
+.tabs a:hover { color: var(--text-primary); text-decoration: none; }
+.tabs a.active { color: var(--text-primary); border-bottom-color: var(--accent); }
+.tabs .count { min-width: 18px; padding: 0 5px; font-size: var(--fs-xs); line-height: 16px; text-align: center; color: var(--text-secondary); background: var(--surface-3); border-radius: 8px; font-variant-numeric: tabular-nums; }
+
+/* ---- tooltip anchor ---- */
+.tip-anchor { display: inline-flex; align-items: center; }
+.tooltip.tip { max-width: 320px; white-space: normal; line-height: 1.45; font-weight: 400; }
+.tooltip.tip strong { font-weight: 600; }
+
+/* ---- choice chips (pick one / many by clicking, instead of a dropdown) ---- */
+.chips { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+.chip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; font: inherit; font-size: var(--fs-sm); font-weight: 550; color: var(--text-secondary); background: var(--surface-1); border: 1px solid var(--border-strong); border-radius: 13px; cursor: pointer; white-space: nowrap; }
+.chip:hover { color: var(--text-primary); background: var(--surface-2); }
+.chip.on { color: var(--text-primary); background: var(--accent-soft); border-color: var(--accent); }
+.chip:disabled { opacity: 0.45; cursor: default; }
+.chip .swatch { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.chip .chip-hint { font-weight: 400; color: var(--text-muted); }
+
+/* ---- sortable lists ---- */
+.drag-handle { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: var(--row-h); padding: 0; color: var(--text-muted); background: none; border: 0; border-radius: var(--radius-sm); cursor: grab; touch-action: none; flex: none; }
+.drag-handle:hover { color: var(--text-primary); background: var(--surface-2); }
+.drag-handle:disabled { cursor: default; opacity: 0.35; }
+.drag-handle:disabled:hover { background: none; color: var(--text-muted); }
+.sort-item.dragging { position: relative; z-index: 2; background: var(--surface-1); box-shadow: var(--shadow), inset 0 0 0 1px var(--accent); border-radius: var(--radius-sm); }
+.sorting, .sorting * { cursor: grabbing !important; user-select: none; }
+
+/* ---- QR code: always dark modules on white, whatever the theme (scanners need it) ---- */
+.qr { display: block; background: #fff; border-radius: var(--radius-sm); }
+.qr path { fill: #000; }
+
+/* ---- device picker ---- */
+.device-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; max-height: 236px; overflow: auto; padding: 1px; }
+.device { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; padding: 6px var(--sp-2); font: inherit; text-align: left; color: var(--text-primary); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; min-width: 0; }
+.device:hover { border-color: var(--border-strong); background: var(--surface-3); }
+.device.on { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.device .name { font-weight: 600; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.device .ip { font-family: var(--mono); font-size: var(--fs-sm); color: var(--text-secondary); }
+.device .meta { font-size: var(--fs-xs); color: var(--text-muted); }
+
+/* ---- disclosure ("Advanced") ---- */
+.disclosure > summary { display: flex; align-items: center; gap: 6px; height: var(--row-h); font-size: var(--fs-sm); font-weight: 600; color: var(--text-secondary); cursor: pointer; list-style: none; user-select: none; }
+.disclosure > summary::-webkit-details-marker { display: none; }
+.disclosure > summary svg { transition: transform 0.12s; }
+.disclosure[open] > summary svg { transform: rotate(90deg); }
+.disclosure > summary:hover { color: var(--text-primary); }
+/* inline notes in drawers and cards (the Network page has its own, same look) */
+.note { display: flex; align-items: flex-start; gap: var(--sp-2); padding: var(--sp-2) var(--sp-3); font-size: var(--fs-sm); color: var(--text-secondary); background: var(--surface-2); border-radius: var(--radius-sm); }
+.note svg { flex: none; margin-top: 1px; }
+.note .btn { flex: none; margin: -2px 0 -2px auto; }
+.note.warn { color: var(--text-primary); background: color-mix(in srgb, var(--warning) 14%, transparent); }
+.note.warn svg { color: var(--warning); }

@@ -1,0 +1,44 @@
+/* VPN page. Tokens only (the QR code's black-on-white lives in components/extras.css). */
+.page .card-hint { font-size: var(--fs-xs); color: var(--text-muted); white-space: nowrap; }
+.vpn-skeleton { display: grid; gap: var(--sp-3); }
+.vpn-skeleton div { height: 140px; border-radius: var(--radius); background: var(--surface-1); border: 1px solid var(--border); }
+.vpn-warn { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-2) var(--sp-3); font-size: var(--fs-sm); color: var(--text-primary); border: 1px solid var(--warning); border-radius: var(--radius-sm); background: var(--surface-1); }
+.vpn-warn svg { color: var(--warning); flex: none; }
+
+.wg-facts { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1) var(--sp-4); padding: var(--sp-2) var(--sp-4); border-bottom: 1px solid var(--border); font-size: var(--fs-sm); }
+.wg-facts .spacer { flex: 1; }
+.wg-pub { gap: 6px; min-width: 0; max-width: 100%; }
+.wg-pub .wg-key { max-width: 22ch; padding: 1px 6px; }
+.wg-key { font-family: var(--mono); font-size: var(--fs-sm); padding: 4px 6px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; user-select: all; }
+
+/* add device */
+.vpn-modes { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2); }
+.vpn-mode { display: flex; flex-direction: column; gap: 4px; padding: var(--sp-3); font: inherit; text-align: left; color: var(--text-primary); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; }
+.vpn-mode:hover { border-color: var(--border-strong); }
+.vpn-mode.on { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.vpn-mode .head { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+.vpn-mode .text { font-size: var(--fs-sm); color: var(--text-secondary); line-height: 1.4; }
+.vpn-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
+.vpn-qr { display: flex; justify-content: center; padding: var(--sp-2); }
+.vpn-secret { display: flex; gap: var(--sp-2); padding: var(--sp-2) var(--sp-3); font-size: var(--fs-sm); line-height: 1.45; border: 1px solid var(--warning); border-radius: var(--radius-sm); }
+.vpn-secret svg { color: var(--warning); flex: none; margin-top: 2px; }
+.vpn-conf { position: relative; }
+.vpn-conf pre { margin: 0; padding: var(--sp-3); font-family: var(--mono); font-size: var(--fs-sm); line-height: 1.5; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: auto; white-space: pre; }
+.vpn-conf .copy { position: absolute; top: var(--sp-2); right: var(--sp-2); }
+.vpn-2col { display: grid; grid-template-columns: 2fr 1fr; gap: var(--sp-3); }
+
+/* setup wizard */
+.vpn-setup { max-width: 860px; }
+.vpn-setup-head { display: flex; gap: var(--sp-3); margin-bottom: var(--sp-4); }
+.vpn-setup-head p { margin: 4px 0 0; max-width: 640px; }
+.vpn-setup-icon { display: grid; place-items: center; width: 44px; height: 44px; flex: none; color: var(--accent); background: var(--accent-soft); border-radius: var(--radius); }
+.vpn-setup-grid { display: grid; grid-template-columns: 160px 220px 1fr; gap: var(--sp-4); align-items: start; }
+.vpn-setup-grid > label { grid-column: 1 / -1; }
+.vpn-setup-foot { display: flex; align-items: center; gap: var(--sp-4); margin-top: var(--sp-4); padding-top: var(--sp-3); border-top: 1px solid var(--border); font-size: var(--fs-sm); }
+.vpn-setup-foot .muted { flex: 1; }
+
+.wg-conf { width: 100%; min-height: 180px; resize: vertical; font-size: var(--fs-sm); }
+.ipsec-user, .ipsec-site { gap: var(--sp-2); padding: 4px 0; border-bottom: 1px solid var(--border); }
+.ipsec-site.clickable { cursor: pointer; }
+.ipsec-site.clickable:hover { background: var(--surface-2); }
+.section-h { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2); margin: 0 0 var(--sp-2); font-size: var(--fs-md); font-weight: 600; }

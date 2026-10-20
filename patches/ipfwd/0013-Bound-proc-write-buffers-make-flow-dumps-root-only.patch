@@ -1,0 +1,146 @@
+From f0e63433bd5bcd980a8b8d7e552b2f2111d0b21f Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 22:21:23 -0500
+Subject: [PATCH 13/18] Bound /proc write buffers; make flow dumps root-only
+
+The cache and ignore_cache_flush write handlers (IPv4 and IPv6) put a
+char[count + 1] VLA on the kernel stack, sized by the write length. One
+200 KB write as root smashed the stack and the ER-4's watchdog reset the
+chip. Use a fixed 64-byte buffer and reject longer writes with -EINVAL.
+
+The cache dumps list every offloaded flow's addresses and ports and were
+world-readable. Make cache, cache_size and ignore_cache_flush 0600, like
+the flows export already is.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ipfwd.c | 32 ++++++++++++++++++++++----------
+ 1 file changed, 22 insertions(+), 10 deletions(-)
+
+diff --git a/ipfwd.c b/ipfwd.c
+index 5c39a9a..a83e6a0 100644
+--- a/ipfwd.c
++++ b/ipfwd.c
+@@ -469,7 +469,7 @@ static int ipv6_fwd_cache_open(struct inode *inode, struct file *file)
+ static ssize_t ipv6_fwd_cache_write(struct file *file, const char __user *buffer,
+ 			            	size_t count, loff_t *ppos)
+ {
+-	char str[count + 1], *strend;
++	char str[64], *strend;	/* input is a short number */
+ 	int action;
+ 
+ 	if(!cvm_ipv6_fwd) {
+@@ -478,6 +478,9 @@ static ssize_t ipv6_fwd_cache_write(struct file *file, const char __user *buffer
+ 	}
+ 
+ 
++	if (count >= sizeof(str))
++		return -EINVAL;
++
+ 	if (copy_from_user(str, buffer, count))
+ 		return -EFAULT;
+ 
+@@ -760,7 +763,7 @@ static int ipv4_fwd_cache_open(struct inode *inode, struct file *file)
+ static ssize_t ipv4_fwd_cache_write(struct file *file, const char __user *buffer,
+ 			            	size_t count, loff_t *ppos)
+ {
+-	char str[count + 1], *strend;
++	char str[64], *strend;	/* longest input: "a.b.c.d port a.b.c.d port" */
+ 	int action;
+ 	u8 src_ip0, src_ip1, src_ip2, src_ip3;
+ 	u8 dst_ip0, dst_ip1, dst_ip2, dst_ip3;
+@@ -773,6 +776,9 @@ static ssize_t ipv4_fwd_cache_write(struct file *file, const char __user *buffer
+ 		return count;
+ 	}
+ 
++	if (count >= sizeof(str))
++		return -EINVAL;
++
+ 	if (copy_from_user(str, buffer, count))
+ 		return -EFAULT;
+ 
+@@ -899,9 +905,12 @@ static int ipv4_fwd_ignore_cache_flush_open(struct inode *inode, struct file *fi
+ static ssize_t ipv4_fwd_ignore_cache_flush_write(struct file *file, const char __user *buffer,
+ 					size_t count, loff_t *ppos)
+ {
+-	char str[count + 1], *strend;
++	char str[64], *strend;	/* input is a short number */
+ 	int action;
+ 
++	if (count >= sizeof(str))
++		return -EINVAL;
++
+ 	if (copy_from_user(str, buffer, count))
+ 		return -EFAULT;
+ 
+@@ -1020,9 +1029,12 @@ static int ipv6_fwd_ignore_cache_flush_open(struct inode *inode, struct file *fi
+ static ssize_t ipv6_fwd_ignore_cache_flush_write(struct file *file, const char __user *buffer,
+ 					size_t count, loff_t *ppos)
+ {
+-	char str[count + 1], *strend;
++	char str[64], *strend;	/* input is a short number */
+ 	int action;
+ 
++	if (count >= sizeof(str))
++		return -EINVAL;
++
+ 	if (copy_from_user(str, buffer, count))
+ 		return -EFAULT;
+ 
+@@ -3937,7 +3949,7 @@ static int cvm_ipv4_init_proc(void)
+ #endif
+ 
+ 	/* create /proc/cavium/ipv4/cache_size entry */
+-	ipfwd_proc.ipv4.cache_size = proc_create_data("cache_size", 0644, ipfwd_proc.ipv4.dir, &ipv4_cache_size_proc_fops, NULL);
++	ipfwd_proc.ipv4.cache_size = proc_create_data("cache_size", 0600, ipfwd_proc.ipv4.dir, &ipv4_cache_size_proc_fops, NULL);
+ 	if (!ipfwd_proc.ipv4.cache_size) {
+ 		pr_err("Failed to create /proc/cavium/ipv4/cache_size\n");
+ 		ret = -ENOMEM;
+@@ -3946,7 +3958,7 @@ static int cvm_ipv4_init_proc(void)
+ 	pr_info("\t/proc/cavium/ipv4/cache_size\n");
+ 
+ 	/* create /proc/cavium/ipv4/cache entry */
+-	ipfwd_proc.ipv4.cache = proc_create_data("cache", 0644, ipfwd_proc.ipv4.dir, &ipv4_cache_proc_fops, NULL);
++	ipfwd_proc.ipv4.cache = proc_create_data("cache", 0600, ipfwd_proc.ipv4.dir, &ipv4_cache_proc_fops, NULL);
+ 	if (!ipfwd_proc.ipv4.cache) {
+ 		pr_err("Failed to create /proc/cavium/ipv4/cache\n");
+ 		ret = -ENOMEM;
+@@ -3955,7 +3967,7 @@ static int cvm_ipv4_init_proc(void)
+ 	pr_info("\t/proc/cavium/ipv4/cache\n");
+ 
+ 	/* create /proc/cavium/ipv4/ignore_cache_flush entry */
+-	ipfwd_proc.ipv4.ignore_cache_flush = proc_create_data("ignore_cache_flush", 0644, ipfwd_proc.ipv4.dir, &ipv4_ignore_cache_flush_proc_fops, NULL);
++	ipfwd_proc.ipv4.ignore_cache_flush = proc_create_data("ignore_cache_flush", 0600, ipfwd_proc.ipv4.dir, &ipv4_ignore_cache_flush_proc_fops, NULL);
+ 	if (!ipfwd_proc.ipv4.cache) {
+ 		pr_err("Failed to create /proc/cavium/ipv4/ignore_cache_flush\n");
+ 		ret = -ENOMEM;
+@@ -4396,7 +4408,7 @@ static int cvm_ipv6_init_proc(void)
+ #endif
+ 
+ 	/* create /proc/cavium/ipv6/cache_size entry */
+-	ipfwd_proc.ipv6.cache_size = proc_create_data("cache_size", 0644, ipfwd_proc.ipv6.dir, &ipv6_cache_size_proc_fops, NULL);
++	ipfwd_proc.ipv6.cache_size = proc_create_data("cache_size", 0600, ipfwd_proc.ipv6.dir, &ipv6_cache_size_proc_fops, NULL);
+ 	if (!ipfwd_proc.ipv6.cache_size) {
+ 		pr_err("Failed to create /proc/cavium/ipv6/cache_size\n");
+ 		ret = -ENOMEM;
+@@ -4405,7 +4417,7 @@ static int cvm_ipv6_init_proc(void)
+ 	pr_info("\t/proc/cavium/ipv6/cache_size\n");
+ 
+ 	/* create /proc/cavium/ipv6/cache entry */
+-	ipfwd_proc.ipv6.cache = proc_create_data("cache", 0644, ipfwd_proc.ipv6.dir, &ipv6_cache_proc_fops, NULL);
++	ipfwd_proc.ipv6.cache = proc_create_data("cache", 0600, ipfwd_proc.ipv6.dir, &ipv6_cache_proc_fops, NULL);
+ 	if (!ipfwd_proc.ipv6.cache) {
+ 		pr_err("Failed to create /proc/cavium/ipv6/cache\n");
+ 		ret = -ENOMEM;
+@@ -4414,7 +4426,7 @@ static int cvm_ipv6_init_proc(void)
+ 	pr_info("\t/proc/cavium/ipv6/cache\n");
+ 
+ 	/* create /proc/cavium/ipv6/ignore_cache_flush entry */
+-	ipfwd_proc.ipv6.ignore_cache_flush = proc_create_data("ignore_cache_flush", 0644, ipfwd_proc.ipv6.dir, &ipv6_ignore_cache_flush_proc_fops, NULL);
++	ipfwd_proc.ipv6.ignore_cache_flush = proc_create_data("ignore_cache_flush", 0600, ipfwd_proc.ipv6.dir, &ipv6_ignore_cache_flush_proc_fops, NULL);
+ 	if (!ipfwd_proc.ipv6.cache) {
+ 		pr_err("Failed to create /proc/cavium/ipv6/ignore_cache_flush\n");
+ 		ret = -ENOMEM;
+-- 
+2.47.3
+

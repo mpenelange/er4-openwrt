@@ -1,0 +1,418 @@
+From 99033dea8e493b30a1ac5544355edb86eae9efb7 Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 21:58:07 -0500
+Subject: [PATCH 12/18] Serialize flow-table control paths; bound flow export by the live table
+
+The flow export (/proc/cavium/ipv4/flows) walked a fixed 8192 buckets
+regardless of ipv4_cache_size. After shrinking the cache, one read ran
+past the vmalloc'ed table and took bucket "spinlocks" in whatever lay
+beyond; on the ER-4 that hard-locked a core until the NMI watchdog reset
+the chip. After growing it, flows above bucket 8191 were never exported,
+and with offload disabled the table pointer is NULL.
+
+Add cvm_ipfwd_table_mutex and take it in every process-context user that
+frees, replaces, resizes or walks a table: cache_size and fwd writes,
+/proc flush and per-entry clear, cache dumps, the stamp-wrap wipe, module
+exit, and the export (held from seq start to stop). The export now uses
+ipv4_cache_size and checks the table exists.
+
+Also:
+- export_seq_next rewound *pos to 0 at the end, so a read never hit EOF
+  and cat streamed the table forever
+- cache_size writes enforce the documented maximum (32768)
+- IPv6 disable freed the table before clearing the fwd flag, so the fast
+  path could still be using it; stop the fast path first, as IPv4 does
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ export.c | 25 ++++++++++------
+ export.h |  1 -
+ ipfwd.c  | 91 +++++++++++++++++++++++++++++++++++++++++++-------------
+ 3 files changed, 86 insertions(+), 31 deletions(-)
+
+diff --git a/export.c b/export.c
+index eb73cc4..5dae682 100644
+--- a/export.c
++++ b/export.c
+@@ -4,6 +4,7 @@
+ #include <linux/proc_fs.h>
+ #include <linux/fs.h>
+ #include <linux/seq_file.h>
++#include <linux/mutex.h>
+ 
+ #include "ipfwd_compat.h"
+ #include "export.h"
+@@ -39,19 +40,28 @@ static void export_it(cvm_ipfwd_flow_entry_t *entry,
+ 
+ extern cvm_ipfwd_flow_bucket_t *cvm_gbl_ipv4_fwd_cache;
+ extern bool cvm_ipv4_export;
++extern struct mutex cvm_ipfwd_table_mutex;
+ 
+ static uint64_t export_count; 
+ 
++/*
++ * The table mutex is held from start to stop (seq_file always calls stop, also
++ * when start returns NULL), so the cache can't be freed or resized under a
++ * read. It can be resized between two read() calls; a reader then simply sees
++ * EOF early (or misses buckets) and gets no 'B' trailer.
++ */
+ static void *export_seq_start(struct seq_file *s, loff_t *pos)
+ {
+     loff_t *spos;
+ 
+-    if (!cvm_ipv4_export) {
++    mutex_lock(&cvm_ipfwd_table_mutex);
++
++    if (!cvm_ipv4_export || !cvm_gbl_ipv4_fwd_cache) {
+         *pos = 0;
+         return NULL;
+     }
+ 
+-    if (*pos >= CVM_IPFWD_LUT_BUCKETS) {
++    if (*pos >= ipv4_cache_size) {
+         return NULL;
+     }
+ 
+@@ -69,8 +79,7 @@ static void *export_seq_next(struct seq_file *s, void *v, loff_t *pos)
+ {
+     loff_t *spos = (loff_t *) v;
+     *pos = ++(*spos);
+-    if (*pos >= CVM_IPFWD_LUT_BUCKETS) {
+-        *pos = 0;
++    if (*pos >= ipv4_cache_size) {	/* EOF; rewinding to 0 here made reads never end */
+         return NULL;
+     }
+     return spos;
+@@ -78,10 +87,8 @@ static void *export_seq_next(struct seq_file *s, void *v, loff_t *pos)
+ 
+ static void export_seq_stop(struct seq_file *s, void *v)
+ {
+-    if (!v) {
+-        return;
+-    }
+     kfree(v);
++    mutex_unlock(&cvm_ipfwd_table_mutex);
+ }
+ 
+ static int export_seq_show(struct seq_file *s, void *v)
+@@ -94,7 +101,7 @@ static int export_seq_show(struct seq_file *s, void *v)
+     int ent_no;
+     unsigned long flags;
+    
+-    if (*spos >= CVM_IPFWD_LUT_BUCKETS) {
++    if (*spos >= ipv4_cache_size) {
+         printk("Error: bad position %d\n", (int)*spos);
+         return -1;
+     }
+@@ -125,7 +132,7 @@ static int export_seq_show(struct seq_file *s, void *v)
+             export_count++;
+         }
+     }
+-    if (*spos == (CVM_IPFWD_LUT_BUCKETS - 1)) {
++    if (*spos == (ipv4_cache_size - 1)) {
+         seq_putc(s, 'B');
+         seq_write(s, &export_count, sizeof(uint64_t));
+     }
+diff --git a/export.h b/export.h
+index 100f3f2..f7d1fe2 100644
+--- a/export.h
++++ b/export.h
+@@ -5,7 +5,6 @@ extern int export_init(void);
+ extern void export_exit(void);
+ 
+ #define EXPORT_MAGIC 0xBABE
+-#define CVM_IPFWD_LUT_BUCKETS CVM_IPFWD_LUT_DEFAULT
+ 
+ typedef struct {
+     uint32_t   saddr;
+diff --git a/ipfwd.c b/ipfwd.c
+index 08e614b..5c39a9a 100644
+--- a/ipfwd.c
++++ b/ipfwd.c
+@@ -18,6 +18,7 @@
+ 
+ #include <linux/inetdevice.h>
+ #include <linux/workqueue.h>
++#include <linux/mutex.h>
+ #include <net/addrconf.h>
+ #include <net/fib_notifier.h>
+ #include <linux/module.h>
+@@ -219,6 +220,15 @@ static inline void cvm_ipfwd_mq_exit(void)
+ 
+ #endif /* CVM_IPFWD_MQUEUES_SUPPORT */
+ 
++/*
++ * Serializes control-plane users of the flow tables: anything that frees,
++ * replaces or resizes a table (enable/disable, cache_size, flush, stamp-wrap
++ * wipe, module exit) and anything that walks one from process context (/proc
++ * cache dumps, per-entry clear, flow export). The fast path doesn't take it;
++ * it is kept off a table by clearing the ipfwd_flags bit plus synchronize_net().
++ */
++DEFINE_MUTEX(cvm_ipfwd_table_mutex);
++
+ /** IPv4 fwd cache */
+ cvm_ipfwd_flow_bucket_t *cvm_gbl_ipv4_fwd_cache = NULL;
+ static int cvm_ipv4_ignore_cache_flush = 0;
+@@ -359,7 +369,9 @@ static int cvm_ipv6_fwd_cache_show(struct seq_file *file, void *ptr)
+     seq_printf(file, "    |      |            |          |       |          |       |       |            |  ID   |      |      |L2 hlen| Src Addr | Dst Addr | Ports       | Proto | PPPOE | VLAN Tag | nfmark |\n");
+     seq_printf(file, "================================================================================================================================================================================================|\n");
+ 
+-    if (!cvm_ipv6_fwd) {
++    mutex_lock(&cvm_ipfwd_table_mutex);
++    if (!cvm_ipv6_fwd || !cvm_gbl_ipv6_fwd_cache) {
++        mutex_unlock(&cvm_ipfwd_table_mutex);
+         return 0;
+     }
+ 
+@@ -440,6 +452,7 @@ static int cvm_ipv6_fwd_cache_show(struct seq_file *file, void *ptr)
+         }
+     }
+     rcu_read_unlock();
++    mutex_unlock(&cvm_ipfwd_table_mutex);
+ 
+     seq_printf(file, "------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|\n");
+     seq_printf(file, "\n");
+@@ -478,6 +491,11 @@ static ssize_t ipv6_fwd_cache_write(struct file *file, const char __user *buffer
+ 		if (cvm_ipv6_ignore_cache_flush)
+ 			break;
+ 
++		mutex_lock(&cvm_ipfwd_table_mutex);
++		if (!cvm_ipv6_fwd) {	/* disabled meanwhile */
++			mutex_unlock(&cvm_ipfwd_table_mutex);
++			break;
++		}
+ 		incr_ipfwd_flow_stat(IPV6_FLUSHES);
+ 		cvm_ipv6_fwd = false;
+ 		clear_ipv6_bit(ipfwd_flags);
+@@ -488,6 +506,7 @@ static ssize_t ipv6_fwd_cache_write(struct file *file, const char __user *buffer
+ 		cvm_ipv6_fwd = true;
+ 		set_ipv6_bit(ipfwd_flags);
+ 		CVMX_SYNCW;
++		mutex_unlock(&cvm_ipfwd_table_mutex);
+ 		break;
+ 	default:
+ 		pr_err("Unknown action\n");
+@@ -652,14 +671,16 @@ static ssize_t ipv4_fwd_cache_size_write(struct file *file, const char __user *i
+ 	buffer[size] = 0;
+ 	val = simple_strtoul(buffer, NULL, 10);
+ 
+-	/* The size didn't change - do nothing. */
+-	if (val == ipv4_cache_size && cvm_gbl_ipv4_fwd_cache) {
+-		goto err;
++	/* Check if the value is 2^n. */
++	if (val == 0 || ((val & (val - 1)) != 0) || val > CVM_IPFWD_LUT_MAX) {
++		printk("Unsupported IPv4 forwarding cache table size %lu (must be 2^n, at most %u)\n", val, CVM_IPFWD_LUT_MAX);
++		return size;
+ 	}
+ 
+-	/* Check if the value is 2^n. */
+-	if (val == 0 || ((val & (val - 1)) != 0)) {
+-		printk("Unsupported IPv4 forwarding cache table size %lu (must be 2^n)\n", val);
++	mutex_lock(&cvm_ipfwd_table_mutex);
++
++	/* The size didn't change - do nothing. */
++	if (val == ipv4_cache_size && cvm_gbl_ipv4_fwd_cache) {
+ 		goto err;
+ 	}
+ 
+@@ -698,6 +719,7 @@ static ssize_t ipv4_fwd_cache_size_write(struct file *file, const char __user *i
+ 	set_ipv4_bit(ipfwd_flags);
+ 	CVMX_SYNCW;
+ err:
++	mutex_unlock(&cvm_ipfwd_table_mutex);
+ 	return size;
+ }
+ 
+@@ -713,13 +735,16 @@ static int ipv4_fwd_cache_show(struct seq_file *file, void *ptr)
+     seq_printf(file, "|         |           |            |       |            |       |       |       |      |  Src Addr   | Src port  | Dst Addr   | Dst port   | Proto | PPPOE Sess ID | VLAN Tag | TOS  | nfmark | Pkts Rcvd | Pkts Send       |\n");
+     seq_printf(file, "======================================================================================================================================================================================================|\n");
+ 
+-	if (!cvm_ipv4_fwd) {
++	mutex_lock(&cvm_ipfwd_table_mutex);
++	if (!cvm_ipv4_fwd || !cvm_gbl_ipv4_fwd_cache) {
++		mutex_unlock(&cvm_ipfwd_table_mutex);
+ 		return 0;
+ 	}
+ 
+ 	rcu_read_lock();	/* flow_info may be freed concurrently (after a grace period) */
+ 	print_flow_entry(file);
+ 	rcu_read_unlock();
++	mutex_unlock(&cvm_ipfwd_table_mutex);
+ 
+ 	seq_printf(file, "\n");
+ #endif
+@@ -774,6 +799,11 @@ static ssize_t ipv4_fwd_cache_write(struct file *file, const char __user *buffer
+ 			if (cvm_ipv4_ignore_cache_flush)
+ 				break;
+ 
++			mutex_lock(&cvm_ipfwd_table_mutex);
++			if (!cvm_ipv4_fwd) {	/* disabled meanwhile */
++				mutex_unlock(&cvm_ipfwd_table_mutex);
++				break;
++			}
+ 			incr_ipfwd_flow_stat(IPV4_FLUSHES);
+ 			cvm_ipv4_fwd = false;
+ 			clear_ipv4_bit(ipfwd_flags);
+@@ -784,6 +814,7 @@ static ssize_t ipv4_fwd_cache_write(struct file *file, const char __user *buffer
+ 			cvm_ipv4_fwd = true;
+ 			set_ipv4_bit(ipfwd_flags);
+ 			CVMX_SYNCW;
++			mutex_unlock(&cvm_ipfwd_table_mutex);
+ 			break;
+ 		default:
+ 			pr_err("Unknown action\n");
+@@ -805,7 +836,8 @@ static ssize_t ipv4_fwd_cache_write(struct file *file, const char __user *buffer
+ 		src_port = htons(src_port);
+ 		dst_port = htons(dst_port);
+ 
+-		for (i = 0; i < ipv4_cache_size; i++) {
++		mutex_lock(&cvm_ipfwd_table_mutex);
++		for (i = 0; cvm_gbl_ipv4_fwd_cache && i < ipv4_cache_size; i++) {
+ 
+ 			bucket = &cvm_gbl_ipv4_fwd_cache[i];
+ 
+@@ -843,6 +875,7 @@ static ssize_t ipv4_fwd_cache_write(struct file *file, const char __user *buffer
+ 
+ 			}
+ 		}
++		mutex_unlock(&cvm_ipfwd_table_mutex);
+ 	} else {
+ 		pr_err("Unexpected input : %s\n", str);
+ 		pr_err("Usage:\n");
+@@ -921,14 +954,16 @@ static ssize_t ipv6_fwd_cache_size_write(struct file *file, const char __user *i
+ 	buffer[size] = 0;
+ 	val = simple_strtoul(buffer, NULL, 10);
+ 
+-	/* The size didn't change - do nothing. */
+-	if (val == ipv6_cache_size && cvm_gbl_ipv6_fwd_cache) {
+-		goto err;
++	/* Check if the value is 2^n. */
++	if (val == 0 || ((val & (val - 1)) != 0) || val > CVM_IPV6FWD_LUT_MAX) {
++		printk("Unsupported IPv6 forwarding cache table size %lu (must be 2^n, at most %u)\n", val, CVM_IPV6FWD_LUT_MAX);
++		return size;
+ 	}
+ 
+-	/* Check if the value is 2^n. */
+-	if (val == 0 || ((val & (val - 1)) != 0)) {
+-		printk("Unsupported IPv6 forwarding cache table size %lu (must be 2^n)\n", val);
++	mutex_lock(&cvm_ipfwd_table_mutex);
++
++	/* The size didn't change - do nothing. */
++	if (val == ipv6_cache_size && cvm_gbl_ipv6_fwd_cache) {
+ 		goto err;
+ 	}
+ 
+@@ -967,6 +1002,7 @@ static ssize_t ipv6_fwd_cache_size_write(struct file *file, const char __user *i
+ 	set_ipv6_bit(ipfwd_flags);
+ 	CVMX_SYNCW;
+ err:
++	mutex_unlock(&cvm_ipfwd_table_mutex);
+ 	return size;
+ }
+ 
+@@ -3432,6 +3468,7 @@ static ssize_t ipv4_fwd_write(struct file *file, const char __user *input,
+ 
+ 	pr_info("IPV4 forwarding %s\n", (val ? "Enabled" : "Disabled"));
+ 
++	mutex_lock(&cvm_ipfwd_table_mutex);
+ 	if (val) {
+ 		if (!cvm_ipv4_fwd && !cvm_gbl_ipv4_fwd_cache) {
+ 			cvm_ipfwd_flow_bucket_t *cache;
+@@ -3469,6 +3506,7 @@ static ssize_t ipv4_fwd_write(struct file *file, const char __user *input,
+ 	}
+ 
+ err:
++	mutex_unlock(&cvm_ipfwd_table_mutex);
+ 	return size;
+ }
+ 
+@@ -4010,12 +4048,14 @@ static void cvm_ipv4_fwd_cleanup(void)
+ 
+ 	pr_info("Freeing IPv4 Forward cache\n");
+ 
+-	/* Free the IPv4 Forwarding cache */
++	/* Free the IPv4 Forwarding cache (/proc readers may still be active) */
++	mutex_lock(&cvm_ipfwd_table_mutex);
+ 	if (cvm_gbl_ipv4_fwd_cache) {
+ 		cvm_ipfwd_flush_cache(cvm_gbl_ipv4_fwd_cache, ipv4_cache_size, CVM_IPFWD_ENTRIES_PER_BUCKET);
+ 		vfree((void *)cvm_gbl_ipv4_fwd_cache);
+ 	}
+ 	cvm_gbl_ipv4_fwd_cache = NULL;
++	mutex_unlock(&cvm_ipfwd_table_mutex);
+ 
+ 	pr_info("Removing IPv4 proc entries\n");
+ 
+@@ -4085,6 +4125,7 @@ static ssize_t ipv6_fwd_write(struct file *file, const char __user *input,
+ 
+ 	pr_info("IPV6 forwarding %s\n", (val ? "Enabled" : "Disabled"));
+ 
++	mutex_lock(&cvm_ipfwd_table_mutex);
+ 	if (val) {
+ 		if (!cvm_ipv6_fwd && !cvm_gbl_ipv6_fwd_cache) {
+ 			cvm_ipfwd_flow_bucket_t *cache;
+@@ -4107,6 +4148,9 @@ static ssize_t ipv6_fwd_write(struct file *file, const char __user *input,
+ 		}
+ 	} else {
+ 		if (cvm_ipv6_fwd && cvm_gbl_ipv6_fwd_cache) {
++			cvm_ipv6_fwd = false;
++			clear_ipv6_bit(ipfwd_flags);
++
+ 			CVMX_SYNC;
+ 			synchronize_net();	/* let fast-path readers finish before freeing */
+ 
+@@ -4114,14 +4158,12 @@ static ssize_t ipv6_fwd_write(struct file *file, const char __user *input,
+ 			vfree((void *)cvm_gbl_ipv6_fwd_cache);
+ 			cvm_gbl_ipv6_fwd_cache = NULL;
+ 
+-			clear_ipv6_bit(ipfwd_flags);
+-			cvm_ipv6_fwd = false;
+-
+ 			CVMX_SYNCW;
+ 		}
+ 	}
+ 
+ err:
++	mutex_unlock(&cvm_ipfwd_table_mutex);
+ 	return size;
+ }
+ 
+@@ -4467,12 +4509,14 @@ void cvm_ipv6_fwd_cleanup(void)
+ 
+ 	pr_info("Freeing IPv6 Forward cache\n");
+ 
+-	/* Free the IPv6 Forwarding cache */
++	/* Free the IPv6 Forwarding cache (/proc readers may still be active) */
++	mutex_lock(&cvm_ipfwd_table_mutex);
+ 	if (cvm_gbl_ipv6_fwd_cache) {
+ 		cvm_ipfwd_flush_cache(cvm_gbl_ipv6_fwd_cache, ipv6_cache_size, CVM_IPFWD_ENTRIES_PER_BUCKET);
+ 		vfree((void *)cvm_gbl_ipv6_fwd_cache);
+ 	}
+ 	cvm_gbl_ipv6_fwd_cache = NULL;
++	mutex_unlock(&cvm_ipfwd_table_mutex);
+ 
+ 	pr_info("Removing IPv6 proc entries\n");
+ 
+@@ -4532,7 +4576,11 @@ static void cvm_ipfwd_inval_work_fn(struct work_struct *work)
+ 	spin_unlock_irqrestore(&cvm_ipfwd_inval_lock, flags);
+ 
+ 	if (wrapped) {
+-		bool v4 = cvm_ipv4_fwd, v6 = cvm_ipv6_fwd;
++		bool v4, v6;
++
++		mutex_lock(&cvm_ipfwd_table_mutex);
++		v4 = cvm_ipv4_fwd;
++		v6 = cvm_ipv6_fwd;
+ 
+ 		cvm_ipv4_fwd = false;
+ 		cvm_ipv6_fwd = false;
+@@ -4551,6 +4599,7 @@ static void cvm_ipfwd_inval_work_fn(struct work_struct *work)
+ 		if (v6)
+ 			set_ipv6_bit(ipfwd_flags);
+ 		CVMX_SYNCW;
++		mutex_unlock(&cvm_ipfwd_table_mutex);
+ 		incr_ipfwd_flow_stat(IPV4_FLUSHES);
+ 	}
+ }
+-- 
+2.47.3
+

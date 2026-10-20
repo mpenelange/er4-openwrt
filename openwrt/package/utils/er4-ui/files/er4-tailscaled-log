@@ -1,0 +1,13 @@
+#!/bin/sh
+# Run tailscaled (the arguments) with its log tidied for the system log. tailscaled writes all of
+# it to stderr, which procd would record at daemon.err, and much of it is routine: a DERP note
+# every 10 s per offline peer, disco key adverts, route-monitor and DNS reconfiguration lines.
+# Here it goes to syslog at daemon.info without its own timestamp, and with ER4_TS_QUIET=1 the
+# routine lines are dropped. exec keeps tailscaled itself the process procd supervises.
+F=/var/run/tailscaled.log
+rm -f $F && mkfifo $F || exec "$@"
+awk -v quiet="${ER4_TS_QUIET:-1}" '
+	{ sub(/^[0-9]+\/[0-9]+\/[0-9]+ [0-9:]+ /, "") }
+	quiet == 1 && /does not know about peer|TSMP disco key|\[RATELIMIT\]|^monitor: RTM_|^netmap: suggested exit node|^dns: (Set|Resolvercfg|OScfg)|^wgengine: Reconfig|^tsdial: bart|^localapi: \[|^router: portUpdate/ { next }
+	{ print; fflush() }' <$F | logger -t tailscaled -p daemon.info &
+exec "$@" >$F 2>&1

@@ -1,0 +1,13 @@
+/* uPlot restyled to the tokens: compact legend that doubles as the crosshair readout. */
+.timeseries { width: 100%; }
+.timeseries .u-legend { font-size: var(--fs-sm); color: var(--text-secondary); text-align: left; margin: 4px 0 0; }
+.timeseries .u-legend .u-series th { font-weight: 500; color: var(--text-secondary); }
+.timeseries .u-legend .u-series td { font-variant-numeric: tabular-nums; color: var(--text-primary); font-weight: 600; }
+.timeseries .u-legend .u-marker { width: 10px; height: 3px; border-radius: 2px; }
+.timeseries .u-cursor-x { border-right: 1px solid var(--axis) !important; }
+.timeseries .u-cursor-y { display: none; }
+/* Legend as a grid: Time in its own column, series in equal columns, so a wrapped row lines
+   up under the first series instead of under Time. Rows are 0-gap; Time spans them all. */
+.timeseries .u-legend tbody { display: grid; grid-template-columns: 15ch repeat(auto-fill, minmax(17ch, 1fr)); column-gap: var(--sp-3); }
+.timeseries .u-legend tr { margin: 0; padding: 1px 0; white-space: nowrap; }
+.timeseries .u-legend tr:first-child { grid-row: span 8; }

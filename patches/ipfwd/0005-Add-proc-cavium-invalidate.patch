@@ -1,0 +1,115 @@
+From 8e1aa3511059acdfee35ec7c32e7fa27e7e46778 Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 23:35:17 -0500
+Subject: [PATCH 05/18] Add /proc/cavium/invalidate
+
+Write to invalidate every cached flow; read the number of invalidations
+so far. Lets management tools invalidate after changes no kernel hook
+reports, notably deleting conntrack entries when a port forward is
+removed (existing NAT'd sessions otherwise keep their mapping, with or
+without offload), and lets tests check which events trigger
+invalidation.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ipfwd.c      | 11 +++++++++--
+ ipfwd_proc.c | 31 +++++++++++++++++++++++++++++++
+ ipfwd_proc.h |  4 ++++
+ 3 files changed, 44 insertions(+), 2 deletions(-)
+
+diff --git a/ipfwd.c b/ipfwd.c
+index be0b1c1..7a56acc 100644
+--- a/ipfwd.c
++++ b/ipfwd.c
+@@ -4331,6 +4331,11 @@ static DEFINE_SPINLOCK(cvm_ipfwd_inval_lock);
+ static bool cvm_ipfwd_inval_wrapped;
+ static atomic_long_t cvm_ipfwd_invalidations = ATOMIC_LONG_INIT(0);
+ 
++long cvm_ipfwd_invalidation_count(void)
++{
++	return atomic_long_read(&cvm_ipfwd_invalidations);
++}
++
+ static void cvm_ipfwd_bump_stamp(void)
+ {
+ 	unsigned long flags;
+@@ -4380,8 +4385,10 @@ static void cvm_ipfwd_inval_work_fn(struct work_struct *work)
+ }
+ static DECLARE_WORK(cvm_ipfwd_inval_work, cvm_ipfwd_inval_work_fn);
+ 
+-/* Safe from any context */
+-static void cvm_ipfwd_invalidate(void)
++/* Safe from any context. Also reachable from userspace via /proc/cavium/invalidate,
++ * e.g. after deleting conntrack entries (no kernel hook fires for that).
++ */
++void cvm_ipfwd_invalidate(void)
+ {
+ 	atomic_long_inc(&cvm_ipfwd_invalidations);
+ 	cvm_ipfwd_bump_stamp();
+diff --git a/ipfwd_proc.c b/ipfwd_proc.c
+index b023085..f9861e6 100644
+--- a/ipfwd_proc.c
++++ b/ipfwd_proc.c
+@@ -514,6 +514,36 @@ static const struct ipfwd_proc_ops common_old_lifetime_proc_fops = {
+ 	IPFWD_PROC_RELEASE	= single_release,
+ };
+ 
++/* /proc/cavium/invalidate: write anything to invalidate every cached flow;
++ * read the number of invalidations so far.
++ */
++static int ipfwd_invalidate_show(struct seq_file *s, void *v)
++{
++	seq_printf(s, "%ld\n", cvm_ipfwd_invalidation_count());
++	return 0;
++}
++
++static int ipfwd_invalidate_proc_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, ipfwd_invalidate_show, NULL);
++}
++
++static ssize_t ipfwd_invalidate_proc_write(struct file *file, const char __user *input,
++					   size_t size, loff_t *ofs)
++{
++	cvm_ipfwd_invalidate();
++	return size;
++}
++
++static const struct ipfwd_proc_ops common_invalidate_proc_fops = {
++	IPFWD_PROC_OWNER
++	IPFWD_PROC_OPEN		= ipfwd_invalidate_proc_open,
++	IPFWD_PROC_READ		= seq_read,
++	IPFWD_PROC_WRITE	= ipfwd_invalidate_proc_write,
++	IPFWD_PROC_LSEEK	= seq_lseek,
++	IPFWD_PROC_RELEASE	= single_release,
++};
++
+ #ifdef CVM_IPFWD_MQUEUES_SUPPORT
+ 
+ extern int cvm_mq_en;
+@@ -577,6 +607,7 @@ static ipfwd_proc_entry_t common_proc_entries[] = {
+ #endif
+ 	{ "flow_new_lifetime", S_IFREG | S_IRUSR, &common_new_lifetime_proc_fops },
+ 	{ "flow_old_lifetime", S_IFREG | S_IRUSR, &common_old_lifetime_proc_fops },
++	{ "invalidate", S_IFREG | S_IRUSR | S_IWUSR, &common_invalidate_proc_fops },
+ 	{}
+ };
+ 
+diff --git a/ipfwd_proc.h b/ipfwd_proc.h
+index 60aadb0..eaa8c25 100644
+--- a/ipfwd_proc.h
++++ b/ipfwd_proc.h
+@@ -89,6 +89,10 @@ extern void dump_buffer(const void *buf, size_t len);
+ extern void dump_buffer_str(const char *str, const void *buf, size_t len);
+ 
+ #ifdef CONFIG_PROC_FS
++/* ipfwd.c */
++extern void cvm_ipfwd_invalidate(void);
++extern long cvm_ipfwd_invalidation_count(void);
++
+ extern int ipfwd_add_proc_entries(struct proc_dir_entry *dir, ipfwd_proc_entry_t *ent, void *data);
+ extern void ipfwd_remove_proc_entries(struct proc_dir_entry *dir, ipfwd_proc_entry_t *ent);
+ #else
+-- 
+2.47.3
+

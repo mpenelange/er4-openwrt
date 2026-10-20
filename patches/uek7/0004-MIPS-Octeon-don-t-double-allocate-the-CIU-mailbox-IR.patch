@@ -1,0 +1,34 @@
+From 53423fe24f2bfc3eb93cf5cd37dc234d98b7dabe Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 22:46:16 -0500
+Subject: [PATCH 04/10] MIPS: Octeon: don't double-allocate the CIU mailbox IRQ descriptors
+
+octeon_irq_init_ciu() allocates OCTEON_IRQ_MBOX0 and OCTEON_IRQ_MBOX1
+with irq_alloc_desc_at() (as in mainline), but the SDK import kept an
+extra irq_alloc_descs_from(OCTEON_IRQ_MBOX0, 2, 0) in between. That
+takes MBOX1's descriptor, the explicit MBOX1 allocation then fails and
+CIU init bails out, leaving later IRQs unmapped. On an ER-4 (CN7130)
+this panics in octeon_wdt ('Couldn't obtain irq 73'). Drop the stray
+call so the function matches mainline.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/mips/cavium-octeon/octeon-irq.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/arch/mips/cavium-octeon/octeon-irq.c b/arch/mips/cavium-octeon/octeon-irq.c
+index f60602bde..215030402 100644
+--- a/arch/mips/cavium-octeon/octeon-irq.c
++++ b/arch/mips/cavium-octeon/octeon-irq.c
+@@ -1552,8 +1552,6 @@ static int __init octeon_irq_init_ciu(
+ 		pr_err("Failed to allocate desc for %s\n", "OCTEON_IRQ_MBOX0");
+ 		goto err;
+ 	}
+-	r = irq_alloc_descs_from(OCTEON_IRQ_MBOX0, 2, 0);
+-	WARN_ON(r < 0);
+ 
+ 	r = octeon_irq_set_ciu_mapping(
+ 		OCTEON_IRQ_MBOX0, 0, 32, 0, chip_mbox, handle_percpu_irq);
+-- 
+2.47.3
+

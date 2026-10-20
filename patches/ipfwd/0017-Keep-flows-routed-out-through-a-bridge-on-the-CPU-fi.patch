@@ -1,0 +1,65 @@
+From 16c64b630c1c2ec3bf6c5a9bc81d6102b3523fcc Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Fri, 16 Oct 2026 18:24:20 -0500
+Subject: [PATCH 17/18] Keep flows routed out through a bridge on the CPU; fix port order in /proc/cavium/flows
+
+On an ER-4 (LAN = br-lan with eth1-eth3, WAN eth0), the reply direction of a
+NATed download was cached with eth1 (the bridge member) as egress and its
+fast-path transmits never reached the host: downloads stalled after the TCP
+handshake (offload off: 40 MB/s). Traffic bridged in was already kept off the
+fast path (br_input.c mark); traffic routed out through a bridge now gets the
+same mark when pkt_cache sees the bridge device, so bridged LANs run on the
+CPU, as the web UI already says. LAN on a plain port: 35 MB/s at ~5% softirq, both
+directions offloaded (limited by the uplink).
+
+/proc/cavium/flows printed sport/dport swapped (the key stores the source port
+in l4_dport); er4.conntrack's offload marks now match.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ipfwd.c | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/ipfwd.c b/ipfwd.c
+index 93dcff4..9a45370 100644
+--- a/ipfwd.c
++++ b/ipfwd.c
+@@ -3057,7 +3057,11 @@ int pkt_cache(struct sk_buff *skb)
+ 	   Just mark entry for the skb if it is not cloned 
+ 	*/
+ 	if (skb->dev->priv_flags & IFF_EBRIDGE) {
+-		return -1;		
++		/* Routed out through a bridge: an entry on the member port loses its packets
++		 * (on hardware 2026-10-16, WAN -> br-lan(eth1): fast-path transmits never reach
++		 * the host). Keep these flows on the CPU, like traffic bridged in (br_input.c). */
++		skb_cvm_reserve(skb, SKB_CVM_RESERVED_2);
++		return -1;
+ 	}
+ 	
+ 	if(skb_cloned(skb))
+@@ -4834,6 +4838,8 @@ static int flows_seq_show(struct seq_file *s, void *v)
+ 		fi = phys_to_virt(e[i].s.flow_info << 2);
+ 		in = dev_get_by_index_rcu(&init_net, fi->rx_ifindex);
+ 		ports = ntohl(fi->ports);
++		/* the key's port names are swapped: setup_*_flow_cache stores the source port in
++		 * l4_dport and the destination port in l4_sport (export.c keeps that quirk) */
+ 		seq_printf(s, "%d %u %s %s ", ip6 ? 6 : 4, e[i].s.ip_proto,
+ 			   in ? in->name : "-", fi->dev ? fi->dev->name : "-");
+ 		if (ip6) {
+@@ -4844,11 +4850,11 @@ static int flows_seq_show(struct seq_file *s, void *v)
+ 			c[0] = fi->ip_saddrhi;    c[1] = fi->ip_saddrlo;
+ 			d[0] = fi->ip_daddrhi;    d[1] = fi->ip_daddrlo;
+ 			seq_printf(s, "%pI6c %u %pI6c %u %pI6c %u %pI6c %u",
+-				   a, ntohs(e[i].s.l4_sport), b, ntohs(e[i].s.l4_dport),
++				   a, ntohs(e[i].s.l4_dport), b, ntohs(e[i].s.l4_sport),
+ 				   c, ports >> 16, d, ports & 0xffff);
+ 		} else {
+ 			seq_printf(s, "%pI4 %u %pI4 %u %pI4 %u %pI4 %u",
+-				   &e[i].s.ip_saddr, ntohs(e[i].s.l4_sport), &e[i].s.ip_daddr, ntohs(e[i].s.l4_dport),
++				   &e[i].s.ip_saddr, ntohs(e[i].s.l4_dport), &e[i].s.ip_daddr, ntohs(e[i].s.l4_sport),
+ 				   &fi->ip_saddr, ports >> 16, &fi->ip_daddr, ports & 0xffff);
+ 		}
+ 		seq_printf(s, " %u %u\n", e[i].s.vlan_id,
+-- 
+2.47.3
+

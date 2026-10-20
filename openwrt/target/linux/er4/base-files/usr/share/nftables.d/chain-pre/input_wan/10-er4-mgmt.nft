@@ -1,0 +1,9 @@
+# Management only from inside, never from the WAN. fw4 puts this at the top of the wan zone's
+# input chain, before any user rule, so a rule that "opens" SSH or the web UI to the WAN has no
+# effect: the UI's login and uhttpd's connection slots stay LAN-only. Port forwards are
+# unaffected: they are DNATed before input. Ports are the stock ones. Dropped, not rejected, like
+# the rest of the WAN (92-er4-firewall): no answer, so a scan sees nothing.
+tcp dport { 22, 80, 443 } counter drop comment "!er4: no management from the WAN"
+# DNS too: dnsmasq answers any source (localservice off, 91-er4-dns, so VPN clients get answers)
+# and leaves the WAN to this rule: never an open resolver, even if a rule opens the WAN's input.
+meta l4proto { tcp, udp } th dport 53 counter drop comment "!er4: no DNS from the WAN"

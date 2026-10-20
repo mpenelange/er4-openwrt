@@ -1,0 +1,17 @@
+# Checkouts, toolchains and build output (tools/build-*.sh, openwrt/setup.sh)
+/src/
+/build/
+/toolchains/
+# Finished firmware images
+/images/
+# Kernel module build output
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+*.order
+*.symvers
+# Scratch
+__pycache__/
+*.log

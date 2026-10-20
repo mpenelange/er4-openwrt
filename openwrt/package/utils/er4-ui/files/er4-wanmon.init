@@ -1,0 +1,11 @@
+#!/bin/sh /etc/rc.common
+# WAN health sampler for the web UI (see /usr/libexec/er4-wanmon)
+START=99
+USE_PROCD=1
+
+start_service() {
+	procd_open_instance
+	procd_set_param command /usr/libexec/er4-wanmon
+	procd_set_param respawn 3600 5 0
+	procd_close_instance
+}

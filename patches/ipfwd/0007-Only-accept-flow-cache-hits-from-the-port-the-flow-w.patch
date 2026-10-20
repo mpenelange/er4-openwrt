@@ -1,0 +1,138 @@
+From 0c9677a948e1f68f71f276eb18ec541c9c716718 Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Sat, 10 Oct 2026 10:09:19 -0500
+Subject: [PATCH 07/18] Only accept flow cache hits from the port the flow was learned on
+
+The flow key is the 5-tuple plus VLAN/PPPoE ids, with no ingress port, so
+a frame carrying a cached flow's tuple was fast-path forwarded whatever
+port it arrived on, before netfilter: past rp_filter, zone policy and
+conntrack.
+
+Record the physical port each flow is learned on (skb_iif resolved
+through VLAN devices, since the rx hook runs before untagging and the
+VLAN id is already in the key) and send hits from any other port to the
+slow path. Packets with no ingress device are not cached.
+
+Tested on the ER-4 with an ingress-port test: with an allowed VLAN 30 -> 40
+flow offloaded, 200 frames with its tuple and a VLAN 30 tag injected on
+eth2 (no VLAN 30 there) reached VLAN 40 200/200 before, 0/200 after.
+Fast-path hits for the real flow unchanged (13932 before, 13906 after).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ipfwd.c        | 42 +++++++++++++++++++++++++++++++++++++++++-
+ ipfwd_common.h |  2 ++
+ 2 files changed, 43 insertions(+), 1 deletion(-)
+
+diff --git a/ipfwd.c b/ipfwd.c
+index 4203fe4..98770f1 100644
+--- a/ipfwd.c
++++ b/ipfwd.c
+@@ -1785,6 +1785,35 @@ static void cvm_ipfwd_setup_flow_info(struct sk_buff *skb, void *ip,
+ 	}
+ }
+ 
++/*
++ * The flow key is the 5-tuple plus VLAN/PPPoE ids, without the port the packet
++ * arrived on, so a frame with a cached flow's tuple was fast-path forwarded
++ * whichever port it came in on: past rp_filter, zone policy and conntrack
++ * (security audit F1). Record the physical port each flow is learned on and
++ * only accept hits from that port.
++ *
++ * At learn time skb_iif is the device the packet was received on after VLAN
++ * untagging (e.g. eth3.30); the rx hook runs before untagging and sees the
++ * physical port (eth3), so resolve through VLAN devices. The VLAN id is
++ * already part of the key. Returns 0 if unknown (locally generated packet).
++ */
++static int cvm_ipfwd_rx_ifindex(struct sk_buff *skb)
++{
++	struct net_device *dev;
++	int ifindex = 0;
++
++	if (!skb->skb_iif)
++		return 0;
++	rcu_read_lock();
++	dev = dev_get_by_index_rcu(dev_net(skb->dev), skb->skb_iif);
++	while (dev && is_vlan_dev(dev))
++		dev = vlan_dev_real_dev(dev);
++	if (dev)
++		ifindex = dev->ifindex;
++	rcu_read_unlock();
++	return ifindex;
++}
++
+ /**
+  * Helper function to verify that the tx 5 tuple also is a match
+  *
+@@ -1870,6 +1899,7 @@ static int cvm_ipfwd_ip_cache_flow(struct sk_buff *skb, void *ip, bool ip6)
+ 	struct tcphdr *l4 = NULL;
+ 	struct cvm_packet_info *cvm_info = &skb->cvm_info;
+ 	unsigned long flags;
++	int rx_ifindex;
+ #ifdef DPI
+ 	u8 cat = 0;
+ 	u16 app = 0;
+@@ -1898,6 +1928,10 @@ static int cvm_ipfwd_ip_cache_flow(struct sk_buff *skb, void *ip, bool ip6)
+ #endif
+ 			return 0;
+ 	}
++
++	rx_ifindex = cvm_ipfwd_rx_ifindex(skb);
++	if (!rx_ifindex)
++		return 0;
+ 	
+ 	if (ip6) {
+ 		ipv6 = 	(struct ipv6hdr *)ip;
+@@ -2029,15 +2063,17 @@ static int cvm_ipfwd_ip_cache_flow(struct sk_buff *skb, void *ip, bool ip6)
+ 
+ 		/* Setup info */
+ 		cvm_ipfwd_setup_flow_info(skb, ip, iptr, cvm_info, ip6);
++		iptr->rx_ifindex = rx_ifindex;
+ 
+ 		/* flow info is ready now */
+ 		entry->s.flow_info = virt_to_phys(iptr) >> 2;
+ 	} else {
+ 		iptr = phys_to_virt(entry->s.flow_info << 2);
+-		if (!is_same_flow(skb, ip, iptr)) {
++		if (!is_same_flow(skb, ip, iptr) || iptr->rx_ifindex != rx_ifindex) {
+ 			memset(iptr, 0, sizeof(cvm_ipfwd_flow_info_t));
+ 			/* Setup info */
+ 			cvm_ipfwd_setup_flow_info(skb, ip, iptr, cvm_info, ip6);
++			iptr->rx_ifindex = rx_ifindex;
+ 		}
+ 	}
+ #ifdef DPI
+@@ -2215,6 +2251,10 @@ static inline u32 low_level_ip_pkt_process(struct sk_buff *skb, cvmx_wqe_t *wqe,
+ 		prefetch(flow_info);
+ 		prefetchw(skb);
+ 
++		/* Only from the port the flow was learned on (F1) */
++		if (unlikely(flow_info->rx_ifindex != skb->dev->ifindex))
++			goto not_found;
++
+ 		flow_info->cache_show_dev_rx = skb->dev;
+ 
+ #ifdef DPI
+diff --git a/ipfwd_common.h b/ipfwd_common.h
+index 0893c3a..a1511ce 100644
+--- a/ipfwd_common.h
++++ b/ipfwd_common.h
+@@ -201,6 +201,7 @@ extern unsigned int ipv4_cache_size; /* Number of hash buckets for ipv4 in the f
+  * @ports: L4 ports
+  * @ip_tos:
+  * @dev: outgoing net device
++ * @rx_ifindex: ifindex of the physical port the flow arrives on; hits from any other port go to the slow path
+  * @oct_dev:
+  * @pkts_rcvd: packets rcvd on this flow.
+  * @pkts_send: packets send on this flow.
+@@ -234,6 +235,7 @@ typedef struct {
+ 	u8	nfmark;
+ #endif
+ 	struct net_device	*dev;
++	int	rx_ifindex;	/* physical port the flow was learned on */
+ 	u8	oct_odev;
+ #ifdef DPI
+ 	u8	dpi_cat;
+-- 
+2.47.3
+

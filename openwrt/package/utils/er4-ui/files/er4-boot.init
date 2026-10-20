@@ -1,0 +1,23 @@
+#!/bin/sh /etc/rc.common
+# Record which image this boot came from (the md5 of vmlinux.64 now): er4.firmware_info tells
+# the running image from one installed since boot by it. And give the UI's index.html this boot's
+# mtime: every image builds it with the same size and timestamp, so uhttpd's ETag never changed
+# and browsers kept the previous image's page after an update (304 Not Modified).
+# Also strongSwan's run dirs: /etc/init.d/swanctl creates them only in start, and its stop writes
+# into them, so a restart before the first start (the Services page) failed and left IPsec down.
+START=15
+
+start() {
+	touch /www/index.html
+	mkdir -p /var/ipsec /var/swanctl
+	local m=/tmp/er4-p1-boot
+	mkdir -p $m
+	mount -t vfat -o ro /dev/mmcblk0p1 $m 2>/dev/null || return 0
+	if [ -s $m/vmlinux.64.md5 ]; then
+		cut -d' ' -f1 $m/vmlinux.64.md5
+	else
+		md5sum $m/vmlinux.64 | cut -d' ' -f1
+	fi > /tmp/er4-booted
+	umount $m
+	rmdir $m
+}

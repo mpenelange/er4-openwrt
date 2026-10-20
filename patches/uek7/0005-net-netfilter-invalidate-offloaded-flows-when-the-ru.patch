@@ -1,0 +1,102 @@
+From de05786ff88f16c05f5b93901e4e9354fbb785b6 Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 23:20:18 -0500
+Subject: [PATCH 05/10] net, netfilter: invalidate offloaded flows when the ruleset changes
+
+The Cavium/UBNT ipfwd engine only re-checks a cached flow occasionally
+(random slow-path samples once the entry is "old", expiry after 16 s at
+HZ=100), so traffic matching a newly added drop rule kept being forwarded
+for ~11 s on an ER-4. EdgeOS works around this in its configuration scripts.
+
+Add cvm_offload_invalidate(), which calls a hook the offload module
+installs (cvm_ipfwd_flush_hook), and call it after every nf_tables commit
+and iptables table replace. CVM_IPFWD_HAVE_FLUSH_HOOK lets the module
+detect the hook. No-op without CONFIG_CAVIUM_IPFWD_OFFLOAD.
+
+Measured on an ER-4 (UEK7, OpenWrt fw4 + nft drop rule added mid-stream):
+offloaded UDP flow stops within 0.5 s (test resolution), was ~11 s.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ include/linux/netdevice.h     |  6 ++++++
+ net/core/dev.c                | 17 +++++++++++++++++
+ net/netfilter/nf_tables_api.c |  3 +++
+ net/netfilter/x_tables.c      |  3 +++
+ 4 files changed, 29 insertions(+)
+
+diff --git a/include/linux/netdevice.h b/include/linux/netdevice.h
+index c9c245d21..cd0337b23 100644
+--- a/include/linux/netdevice.h
++++ b/include/linux/netdevice.h
+@@ -5325,6 +5325,12 @@ extern struct net_device *blackhole_netdev;
+ #ifdef CONFIG_CAVIUM_IPFWD_OFFLOAD
+ extern u32 (*cvm_ipfwd_rx_hook)(struct sk_buff *);
+ extern int (*cvm_ipfwd_tx_hook)(struct sk_buff *);
++/* Lets out-of-tree offload modules detect the flush hook */
++#define CVM_IPFWD_HAVE_FLUSH_HOOK 1
++extern void (*cvm_ipfwd_flush_hook)(void);
++void cvm_offload_invalidate(void);
++#else
++static inline void cvm_offload_invalidate(void) { }
+ #endif
+ 
+ #endif	/* _LINUX_NETDEVICE_H */
+diff --git a/net/core/dev.c b/net/core/dev.c
+index aa6f124de..144fe9730 100644
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -199,6 +199,23 @@ EXPORT_SYMBOL(cvm_ipfwd_rx_hook);
+ 
+ int (*cvm_ipfwd_tx_hook)(struct sk_buff *);
+ EXPORT_SYMBOL(cvm_ipfwd_tx_hook);
++
++/* Set by the offload module: invalidate every cached flow. Called whenever
++ * packet-filtering policy changes, so offloaded flows can't keep bypassing a
++ * rule that was just added (the engine otherwise only re-checks a flow every
++ * few seconds).
++ */
++void (*cvm_ipfwd_flush_hook)(void);
++EXPORT_SYMBOL(cvm_ipfwd_flush_hook);
++
++void cvm_offload_invalidate(void)
++{
++	void (*flush)(void) = READ_ONCE(cvm_ipfwd_flush_hook);
++
++	if (flush)
++		flush();
++}
++EXPORT_SYMBOL(cvm_offload_invalidate);
+ #endif
+ 
+ static DEFINE_MUTEX(ifalias_mutex);
+diff --git a/net/netfilter/nf_tables_api.c b/net/netfilter/nf_tables_api.c
+index c1b5b579c..f9c449c48 100644
+--- a/net/netfilter/nf_tables_api.c
++++ b/net/netfilter/nf_tables_api.c
+@@ -9750,6 +9750,9 @@ static int nf_tables_commit(struct net *net, struct sk_buff *skb)
+ 	nft_gc_seq_end(nft_net, gc_seq);
+ 	nf_tables_commit_release(net);
+ 
++	/* new ruleset: offloaded flows must be re-checked against it */
++	cvm_offload_invalidate();
++
+ 	return 0;
+ }
+ 
+diff --git a/net/netfilter/x_tables.c b/net/netfilter/x_tables.c
+index 9c0ec0bbb..97a4791b3 100644
+--- a/net/netfilter/x_tables.c
++++ b/net/netfilter/x_tables.c
+@@ -1466,6 +1466,9 @@ xt_replace_table(struct xt_table *table,
+ 			!private->number ? AUDIT_XT_OP_REGISTER :
+ 					   AUDIT_XT_OP_REPLACE,
+ 			GFP_KERNEL);
++
++	/* new ruleset: offloaded flows must be re-checked against it */
++	cvm_offload_invalidate();
+ 	return private;
+ }
+ EXPORT_SYMBOL_GPL(xt_replace_table);
+-- 
+2.47.3
+

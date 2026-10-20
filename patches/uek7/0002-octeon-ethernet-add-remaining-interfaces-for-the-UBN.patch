@@ -1,0 +1,164 @@
+From 74682b76ffaa06f7a1abfa4064e807b6d61c9c55 Mon Sep 17 00:00:00 2001
+From: mpenelange <191051681+mpenelange@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 22:35:07 -0500
+Subject: [PATCH 02/10] octeon-ethernet: add remaining interfaces for the UBNT ipfwd offload module
+
+UEK7's SDK driver already has is_oct_dev(), cvm_oct_transmit_qos_not_free()
+and the PKO n2/ipoffp1 offload tweaks. Add the rest, as on the UEK6 er4
+branch: rx/tx callback registration under UBNT's names + priv->tx_cb,
+net_device->is_cvm_dev, IPv4 5-tuple atomic PIP tagging, and the ER-4
+cvm_oct_get_vlan_netdev() stub. Fix the SDK's NULL check after
+allocating rcv_work in cvm_oct_transmit_qos_not_free() (it tested 'work').
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../include/asm/octeon/octeon-ethernet-user.h |  4 +++
+ .../ethernet/cavium/octeon/ethernet-mdio.c    | 11 +++++++
+ .../net/ethernet/cavium/octeon/ethernet-tx.c  |  2 +-
+ .../ethernet/cavium/octeon/ethernet-xmit.c    |  3 ++
+ drivers/net/ethernet/cavium/octeon/ethernet.c | 33 +++++++++++++++++++
+ .../ethernet/cavium/octeon/octeon-ethernet.h  |  2 ++
+ 6 files changed, 54 insertions(+), 1 deletion(-)
+
+diff --git a/arch/mips/include/asm/octeon/octeon-ethernet-user.h b/arch/mips/include/asm/octeon/octeon-ethernet-user.h
+index d4b3d85fe..8ec92e2ec 100644
+--- a/arch/mips/include/asm/octeon/octeon-ethernet-user.h
++++ b/arch/mips/include/asm/octeon/octeon-ethernet-user.h
+@@ -95,6 +95,9 @@ typedef cvm_oct_callback_result_t (*cvm_oct_callback_t)(struct net_device *dev,
+ 							struct sk_buff *skb);
+ 
+ extern struct net_device *cvm_oct_register_callback(const char *, cvm_oct_callback_t);
++/* Names used by the UBNT/Cavium ipfwd offload module */
++extern struct net_device *cvm_oct_register_rx_callback(const char *, cvm_oct_callback_t);
++extern struct net_device *cvm_oct_register_tx_callback(const char *, cvm_oct_callback_t);
+ extern struct net_device *is_oct_dev(const char *device_name);
+ 
+ #ifdef CONFIG_CAVIUM_NET_PACKET_FWD_OFFLOAD
+@@ -106,6 +109,7 @@ extern int cvm_oct_transmit_qos(struct net_device *dev,
+ extern int cvm_oct_transmit_qos_not_free(struct net_device *dev,
+ 					 void *work_queue_entry,
+ 					 struct sk_buff *skb);
++extern struct net_device *cvm_oct_get_vlan_netdev(u16 vid);
+ 
+ extern struct net_device *octeon3_register_callback(
+ 		const char	*device_name, cvm_oct_callback_t callback);
+diff --git a/drivers/net/ethernet/cavium/octeon/ethernet-mdio.c b/drivers/net/ethernet/cavium/octeon/ethernet-mdio.c
+index bc842d1ef..3108539d2 100644
+--- a/drivers/net/ethernet/cavium/octeon/ethernet-mdio.c
++++ b/drivers/net/ethernet/cavium/octeon/ethernet-mdio.c
+@@ -524,3 +524,14 @@ int cvm_oct_phy_setup_device(struct net_device *dev)
+ 	netif_carrier_on(dev);
+ 	return 0;
+ }
++
++#ifdef CONFIG_CAVIUM_NET_PACKET_FWD_OFFLOAD
++/* UBNT maps switch VLANs to netdevs on the ER-12 (E302/E303), which has an
++ * on-board switch. The ER-4 has none, so there is never a VLAN netdev here.
++ */
++struct net_device *cvm_oct_get_vlan_netdev(u16 vid)
++{
++	return NULL;
++}
++EXPORT_SYMBOL(cvm_oct_get_vlan_netdev);
++#endif
+diff --git a/drivers/net/ethernet/cavium/octeon/ethernet-tx.c b/drivers/net/ethernet/cavium/octeon/ethernet-tx.c
+index 9d64f5f32..5e18f524d 100644
+--- a/drivers/net/ethernet/cavium/octeon/ethernet-tx.c
++++ b/drivers/net/ethernet/cavium/octeon/ethernet-tx.c
+@@ -337,7 +337,7 @@ int cvm_oct_transmit_qos_not_free(struct net_device *dev,
+ 						1 + cvmx_wqe_get_unused8(work);
+ 
+ 	rcv_work = cvmx_fpa_alloc(wqe_pool);
+-	if (unlikely(!work)) {
++	if (unlikely(!rcv_work)) {	/* SDK/UBNT checked !work here */
+ 		netdev_err(dev, "failed to allocate rcv work\n");
+ 		dropped = -1;
+ 		goto skip_xmit;
+diff --git a/drivers/net/ethernet/cavium/octeon/ethernet-xmit.c b/drivers/net/ethernet/cavium/octeon/ethernet-xmit.c
+index 148e2da35..be8b4ff67 100644
+--- a/drivers/net/ethernet/cavium/octeon/ethernet-xmit.c
++++ b/drivers/net/ethernet/cavium/octeon/ethernet-xmit.c
+@@ -333,6 +333,9 @@ CVM_OCT_XMIT
+ 		work->packet_ptr.u64 = (unsigned long)skb;
+ 	}
+ 
++	if (priv->tx_cb)
++		priv->tx_cb(priv->netdev, work, skb);
++
+ 	local_irq_save(flags);
+ 
+ 	cvmx_pko_send_packet_prepare_pkoid(priv->pko_port,
+diff --git a/drivers/net/ethernet/cavium/octeon/ethernet.c b/drivers/net/ethernet/cavium/octeon/ethernet.c
+index 9264e0096..9048da6ed 100644
+--- a/drivers/net/ethernet/cavium/octeon/ethernet.c
++++ b/drivers/net/ethernet/cavium/octeon/ethernet.c
+@@ -432,6 +432,28 @@ struct net_device *cvm_oct_register_callback(const char *device_name, cvm_oct_ca
+ }
+ EXPORT_SYMBOL(cvm_oct_register_callback);
+ 
++/* Names used by the UBNT ipfwd offload module */
++struct net_device *cvm_oct_register_rx_callback(const char *device_name, cvm_oct_callback_t callback)
++{
++	return cvm_oct_register_callback(device_name, callback);
++}
++EXPORT_SYMBOL(cvm_oct_register_rx_callback);
++
++struct net_device *cvm_oct_register_tx_callback(const char *device_name, cvm_oct_callback_t callback)
++{
++	struct octeon_ethernet *priv;
++
++	list_for_each_entry(priv, &cvm_oct_list, list) {
++		if (strcmp(device_name, priv->netdev->name) == 0) {
++			priv->tx_cb = callback;
++			wmb();
++			return priv->netdev;
++		}
++	}
++	return NULL;
++}
++EXPORT_SYMBOL(cvm_oct_register_tx_callback);
++
+ #ifdef CONFIG_CAVIUM_NET_PACKET_FWD_OFFLOAD
+ struct net_device *is_oct_dev(const char *device_name)
+ {
+@@ -976,6 +998,14 @@ static int cvm_oct_probe(struct platform_device *pdev)
+ 				continue;
+ 			pip_prt_tagx.u64 = cvmx_read_csr(CVMX_PIP_PRT_TAGX(port));
+ 			pip_prt_tagx.s.grp = pow_receive_group;
++#ifdef CONFIG_CAVIUM_NET_PACKET_FWD_OFFLOAD
++			/* Tag IPv4 by 5-tuple, atomically, as UBNT does for the offload engine */
++			pip_prt_tagx.s.ip4_tag_type  = (cvmx_pow_tag_type_t)CVMX_POW_TAG_TYPE_ATOMIC;
++			pip_prt_tagx.s.ip4_src_flag  = 1;
++			pip_prt_tagx.s.ip4_dst_flag  = 1;
++			pip_prt_tagx.s.ip4_sprt_flag = 1;
++			pip_prt_tagx.s.ip4_dprt_flag = 1;
++#endif
+ 			cvmx_write_csr(CVMX_PIP_PRT_TAGX(port), pip_prt_tagx.u64);
+ 		}
+ 	}
+@@ -1014,6 +1044,9 @@ static int cvm_oct_probe(struct platform_device *pdev)
+ 				continue;
+ 			}
+ 
++#ifdef CONFIG_CAVIUM_IPFWD_OFFLOAD
++			dev->is_cvm_dev = 1;
++#endif
+ #ifdef CONFIG_CAVIUM_IPFWD_OFFLOAD
+ 			dev->is_cvm_dev = 1;
+ #endif
+diff --git a/drivers/net/ethernet/cavium/octeon/octeon-ethernet.h b/drivers/net/ethernet/cavium/octeon/octeon-ethernet.h
+index 10ffdeac5..ba79234ef 100644
+--- a/drivers/net/ethernet/cavium/octeon/octeon-ethernet.h
++++ b/drivers/net/ethernet/cavium/octeon/octeon-ethernet.h
+@@ -73,6 +73,8 @@ struct octeon_ethernet {
+ 
+ 	/* Optional intecept callback defined above */
+ 	cvm_oct_callback_t      intercept_cb;
++	/* Optional callback run on every transmitted packet (flow offload) */
++	cvm_oct_callback_t      tx_cb;
+ 
+ 	/* Number of elements in tx_queue below */
+ 	int                     num_tx_queues;
+-- 
+2.47.3
+
