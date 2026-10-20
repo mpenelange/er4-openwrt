@@ -57,7 +57,8 @@ export function WanCard({ ifaces, dns, eth0, rate, error }: { ifaces?: NetInterf
             ['DNS', used.length
               ? <a href="#/dns/upstream" class="wan-dns" title={isp.length ? `The ISP offers ${isp.join(', ')}${ispUnused ? ' (not used)' : ''}` : undefined}>
                   <span class="mono">{used.map((x) => x.s).join(', ')}</span>
-                  {dns?.upstream.length ? <span class="muted">{used.some((x) => x.isp) ? ' · ISP + yours' : ' · yours'}</span> : <span class="muted"> · ISP</span>}
+                  {/* your own servers need no label; say when the ISP's are in use */}
+                  {!dns?.upstream.length ? <span class="muted"> · ISP</span> : used.some((x) => x.isp) && <span class="muted"> · with the ISP's</span>}
                 </a>
               : dash, used.map((x) => x.s).join(', ')],
             ['IPv6', v6 ? <span class="mono">{v6.address}/{v6.mask}</span> : <span class="muted">{wan6?.up ? 'no address' : wan6 ? 'down' : 'not configured'}</span>, v6?.address],
