@@ -12,7 +12,23 @@ export async function reloadFresh() {
   location.reload()
 }
 
-/** Once per app start: if the router's index.html no longer loads this bundle, reload (once). */
+let entry = ''
+
+/** Check for a newer UI now, and again whenever the tab comes back into view: a tab left open
+ *  across a firmware update (reboot, back to the login page) would otherwise keep running the
+ *  old app. */
+export function watchStale(url: string) {
+  entry = url
+  checkStale()
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkStale() })
+}
+
+/** Check again (after logging in, say). */
+export function checkStale() {
+  if (entry) reloadIfStale(entry)
+}
+
+/** If the router's index.html no longer loads this bundle, reload (once per bundle). */
 export function reloadIfStale(entry: string) {
   const me = new URL(entry).pathname.split('/').pop()
   if (!me) return

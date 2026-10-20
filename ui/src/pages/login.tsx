@@ -3,6 +3,7 @@ import { api, isMock } from '../api/client'
 import { system } from '../api/system'
 import { LOGIN_THROTTLED, UbusError } from '../api/ubus'
 import { Icon } from '../components/icons'
+import { checkStale } from '../api/fresh'
 
 export function Login({ onLogin }: { onLogin: () => void }) {
   // A factory-fresh router has no root password and refuses every login: set one first
@@ -28,6 +29,7 @@ function Password({ onLogin }: { onLogin: () => void }) {
     try {
       await api.login('root', password)
       onLogin()
+      checkStale()
     } catch (err) {
       setError(err instanceof UbusError && err.code === LOGIN_THROTTLED ? 'Too many failed attempts. Wait a minute, then try again.' : 'Wrong password')
     } finally {
@@ -68,6 +70,7 @@ function Setup({ onLogin }: { onLogin: () => void }) {
       if (!r.result) throw new Error(r.error === 'a password is already set' ? 'A password has already been set. Reload to log in.' : 'The router refused the password')
       await api.login('root', pw)
       onLogin()
+      checkStale()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
