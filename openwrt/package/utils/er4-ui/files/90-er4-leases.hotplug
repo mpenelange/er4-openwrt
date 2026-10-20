@@ -1,0 +1,4 @@
+# dnsmasq lease added, renewed or removed: save the leases to the eMMC (see /usr/libexec/er4-leases).
+# Sourced by hotplug-call, so no exit here. (A script in /etc/hotplug.d/dhcp is also what makes
+# OpenWrt's dnsmasq run its dhcp-script at all.)
+/usr/libexec/er4-leases save --later

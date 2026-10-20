@@ -61,6 +61,10 @@ define Package/er4-ui/install
 	$(INSTALL_BIN) ./files/er4-statsmon.init $(1)/etc/init.d/er4-statsmon
 	$(INSTALL_BIN) ./files/er4-boot.init $(1)/etc/init.d/er4-boot
 	$(INSTALL_DATA) ./files/90-er4-wan.hotplug $(1)/etc/hotplug.d/iface/90-er4-wan
+	$(INSTALL_DIR) $(1)/etc/hotplug.d/dhcp
+	$(INSTALL_DATA) ./files/90-er4-leases.hotplug $(1)/etc/hotplug.d/dhcp/90-er4-leases
+	$(INSTALL_BIN) ./files/er4-leases $(1)/usr/libexec/er4-leases
+	$(INSTALL_BIN) ./files/er4-leases.init $(1)/etc/init.d/er4-leases
 	$(INSTALL_BIN) ./files/er4-tailscale.defaults $(1)/etc/uci-defaults/90-er4-tailscale
 	# Tailscale: the service and its config; the binaries are fetched onto the eMMC
 	# (er4-tailscale-fetch), and /usr/sbin points there

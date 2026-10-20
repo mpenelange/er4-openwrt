@@ -1,0 +1,13 @@
+#!/bin/sh /etc/rc.common
+# DHCP leases across reboots (see /usr/libexec/er4-leases): restored before dnsmasq (START=19)
+# creates an empty lease file, saved at shutdown
+START=18
+STOP=10
+
+start() {
+	/usr/libexec/er4-leases restore
+}
+
+stop() {
+	/usr/libexec/er4-leases save
+}

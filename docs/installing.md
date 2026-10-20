@@ -28,6 +28,7 @@ come up, you fall back from the serial console (see [Recovery](#recovery)).
 | eMMC p1 `vmlinux.64.edgeos` | The stock EdgeOS kernel (set aside at first install; nothing manages it) |
 | eMMC p1 `vmlinux.64o` | EdgeOS's own previous kernel, if it had one (left alone) |
 | eMMC p2 (ext3/4) `er4/etc` | Your configuration: the persistent upper layer of `/etc` |
+| eMMC p2 `er4/dhcp.leases` | A copy of the DHCP leases, so devices keep their addresses and local DNS names across a reboot |
 | eMMC p2 `er4/tailscale` | Tailscale's binaries, once it's set up (downloaded, then updated by Tailscale itself) |
 | eMMC p2, everything else | EdgeOS's root filesystem and its configuration, untouched |
 | RAM | Everything else. The system runs from the image's initramfs |

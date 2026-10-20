@@ -1,0 +1,36 @@
+#!/bin/sh
+# DHCP leases across reboots. dnsmasq keeps them in /tmp (RAM), so after a reboot the router had
+# forgotten every lease, and with them the local DNS names devices register (nas.lan, ...),
+# until each device renewed: hours. This keeps a copy on the eMMC data partition, outside /etc
+# so it stays out of config backups. dnsmasq drops leases that expired meanwhile when it loads.
+#   er4-leases restore        at boot, before dnsmasq (/etc/init.d/er4-leases)
+#   er4-leases save           at shutdown; writes only when the leases changed
+#   er4-leases save --later   on every lease change (/etc/hotplug.d/dhcp/90-er4-leases): one
+#                             save 5 s later, so a burst of events (dnsmasq reports every lease
+#                             when it starts) is one write
+DATA=/mnt/er4data
+SAVED=$DATA/er4/dhcp.leases
+LEASES=$(uci -q get dhcp.@dnsmasq[0].leasefile)
+LEASES=${LEASES:-/tmp/dhcp.leases}
+
+# netbooted (or p2 didn't mount): nothing persists, nothing to do
+grep -q " $DATA " /proc/mounts || exit 0
+
+case "$1" in
+restore)
+	[ -s "$SAVED" ] && [ ! -s "$LEASES" ] && cp "$SAVED" "$LEASES"
+	;;
+save)
+	if [ "$2" = --later ]; then
+		P=/var/run/er4-leases.pending
+		[ -e $P ] && exit 0
+		touch $P
+		( sleep 5; rm -f $P; exec "$0" save ) </dev/null >/dev/null 2>&1 &
+		exit 0
+	fi
+	[ -f "$LEASES" ] || exit 0
+	cmp -s "$LEASES" "$SAVED" && exit 0
+	cp "$LEASES" "$SAVED.new" && mv "$SAVED.new" "$SAVED"
+	;;
+esac
+exit 0
