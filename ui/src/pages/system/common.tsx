@@ -75,27 +75,43 @@ export function SettingRow({ label, hint, children, badges, dim }: { label: Comp
 /** Drop a file here or click to choose. */
 export function Dropzone({ accept, onFile, title, hint, disabled }: { accept?: string; onFile: (f: File) => void; title: ComponentChildren; hint?: ComponentChildren; disabled?: boolean }) {
   const [over, setOver] = useState(false)
+  const [noFile, setNoFile] = useState(false)
   const input = useRef<HTMLInputElement>(null)
+  // A file dropped beside the zone would make the browser open it (and leave the UI): while a
+  // drop zone is on the page, stray drops are swallowed.
+  useEffect(() => {
+    const stop = (e: DragEvent) => { if (e.dataTransfer?.types.includes('Files')) e.preventDefault() }
+    window.addEventListener('dragover', stop)
+    window.addEventListener('drop', stop)
+    return () => { window.removeEventListener('dragover', stop); window.removeEventListener('drop', stop) }
+  }, [])
+  const take = (f: File | undefined) => {
+    setNoFile(!f)
+    if (f && !disabled) onFile(f)
+  }
   return (
     <div class={`dropzone${over ? ' over' : ''}${disabled ? ' disabled' : ''}`} role="button" tabIndex={0}
       onClick={() => !disabled && input.current?.click()}
       onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && !disabled && input.current?.click()}
-      onDragOver={(e) => { e.preventDefault(); setOver(true) }}
-      onDragLeave={() => setOver(false)}
+      onDragEnter={(e) => { e.preventDefault(); setOver(true) }}
+      onDragOver={(e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'; setOver(true) }}
+      // leaving for a child element isn't leaving the zone
+      onDragLeave={(e) => { if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node | null)) setOver(false) }}
       onDrop={(e) => {
         e.preventDefault()
+        e.stopPropagation()
         setOver(false)
-        const f = e.dataTransfer?.files[0]
-        if (f && !disabled) onFile(f)
+        take(e.dataTransfer?.files[0])
       }}>
       <Icon name="upload" size={20} />
       <div>
         <div class="dz-title">{title}</div>
-        {hint && <div class="dz-hint">{hint}</div>}
+        {noFile
+          ? <div class="dz-hint warn-text">That drop had no file in it (some apps hand over a link or path instead). Drag it from your file manager, or click to choose.</div>
+          : hint && <div class="dz-hint">{hint}</div>}
       </div>
       <input ref={input} type="file" accept={accept} hidden onChange={(e) => {
-        const f = (e.target as HTMLInputElement).files?.[0]
-        if (f) onFile(f)
+        take((e.target as HTMLInputElement).files?.[0])
         ;(e.target as HTMLInputElement).value = ''
       }} />
     </div>

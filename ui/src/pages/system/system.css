@@ -74,6 +74,8 @@
 .dropzone { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-4); border: 1px dashed var(--border-strong); border-radius: var(--radius); background: var(--surface-2); color: var(--text-secondary); cursor: pointer; }
 .dropzone:hover, .dropzone.over { border-color: var(--accent); background: var(--accent-soft); color: var(--text-primary); }
 .dropzone.disabled { opacity: 0.5; cursor: default; }
+.dropzone .dz-hint.warn-text { color: var(--text-primary); }
+.dropzone .dz-hint.warn-text::before { content: "⚠ "; color: var(--warning); }
 .dz-title { font-weight: 600; color: var(--text-primary); }
 .dz-hint { font-size: var(--fs-sm); }
 .update-check { display: flex; align-items: center; gap: var(--sp-2); }
